@@ -6,7 +6,6 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static('public'));
 
-// Date de démarrage — on ne traite que les messages APRÈS ce moment
 const AGENT_START_TIME = new Date();
 console.log('Agent démarré à:', AGENT_START_TIME.toISOString());
 
@@ -26,7 +25,7 @@ HORAIRES :
 
 ACCÈS :
 - Digicode d'entrée immeuble : {DIGICODE}
-- Wi-Fi : réseau Résidence Industrie / mot de passe {WIFI_PASSWORD}
+- Wi-Fi mot de passe : {WIFI_PASSWORD}
 - Chaque logement a une boîte à clé avec code
 - Check-in 100% autonome, codes envoyés automatiquement avant l'arrivée
 - Codes non reçus → rassurer, vérifier spams
@@ -66,7 +65,6 @@ async function getFetch() {
   return fetch;
 }
 
-// Token Beds24
 let beds24Token = null;
 let tokenExpiry = 0;
 
@@ -74,10 +72,8 @@ async function getBeds24Token() {
   const fetch = await getFetch();
   const now = Date.now();
   if (beds24Token && now < tokenExpiry - 300000) return beds24Token;
-
   const refreshToken = process.env.BEDS24_REFRESH_TOKEN;
-  if (!refreshToken) { console.log('BEDS24_REFRESH_TOKEN manquant'); return null; }
-
+  if (!refreshToken) return null;
   try {
     const response = await fetch('https://beds24.com/api/v2/authentication/token', {
       headers: { 'refreshToken': refreshToken }
@@ -91,30 +87,26 @@ async function getBeds24Token() {
     }
     return null;
   } catch (err) {
-    console.error('Erreur getBeds24Token:', err.message);
+    console.error('Erreur token:', err.message);
     return null;
   }
 }
 
-// Cache propriété
 let propertyCache = null;
 let propertyCacheTime = 0;
 
 async function getPropertyInfo() {
   const now = Date.now();
   if (propertyCache && now - propertyCacheTime < 3600000) return propertyCache;
-
   try {
     const fetch = await getFetch();
     const token = await getBeds24Token();
     if (!token) return null;
-
     const response = await fetch('https://beds24.com/api/v2/properties?includeAllRooms=true', {
       headers: { 'token': token }
     });
     const raw = await response.json();
     const prop = raw?.data?.[0] || raw?.[0] || raw;
-
     propertyCache = {
       digicode: prop?.templates?.template1 || 'voir message automatique',
       wifi_password: prop?.templates?.template2 || 'voir message automatique',
@@ -129,7 +121,7 @@ async function getPropertyInfo() {
     console.log('Propriété chargée, logements:', propertyCache.rooms.length);
     return propertyCache;
   } catch (err) {
-    console.error('Erreur getPropertyInfo:', err.message);
+    console.error('Erreur propriété:', err.message);
     return null;
   }
 }
@@ -156,10 +148,9 @@ async function fetchAndReplyBeds24Messages() {
     const fetch = await getFetch();
     const token = await getBeds24Token();
     if (!token) return;
-
     const propInfo = await getPropertyInfo();
 
-    const response = await fetch('https://beds24.com/api/v2/bookings/messages?unread=true', {
+    const response = await fetch('https://beds24.com/api/v2/bookings/messages?maxResults=50', {
       headers: { 'token': token }
     });
 
@@ -172,30 +163,29 @@ async function fetchAndReplyBeds24Messages() {
     const messages = raw?.data || raw;
     if (!Array.isArray(messages)) return;
 
-    let nouveaux = 0;
     for (const msg of messages) {
       const msgId = msg.id || msg.messageId;
       if (!msgId || processedMessages.has(msgId)) continue;
 
-      // FILTRE DATE — ignorer les messages antérieurs au démarrage de l'agent
-      const msgTime = msg.time ? new Date(msg.time) : null;
-      if (msgTime && msgTime < AGENT_START_TIME) {
-        processedMessages.add(msgId); // Marquer comme traité sans répondre
-        continue;
-      }
+      // Toujours marquer comme traité pour éviter la boucle
+      processedMessages.add(msgId);
 
-      // Ignorer les messages de l'hôte
-      if (msg.type === 'host' || msg.fromHost || msg.authorOwnerId !== null) {
-        processedMessages.add(msgId);
+      // FILTRE 1 — Ignorer les messages anciens (avant démarrage agent)
+      const msgTime = msg.time ? new Date(msg.time) : null;
+      if (!msgTime || msgTime < AGENT_START_TIME) continue;
+
+      // FILTRE 2 — Ignorer TOUS les messages qui ne sont pas de type "guest"
+      // type peut être: "guest", "host", "internal", "system", "airbnb", "booking"
+      const msgType = msg.type || '';
+      if (msgType !== 'guest') {
+        console.log('Message ignoré (type:', msgType, ')');
         continue;
       }
 
       const messageText = msg.message || msg.text || '';
       if (!messageText.trim()) continue;
 
-      nouveaux++;
-      console.log('Nouveau message:', msgId, '-', messageText.substring(0, 80));
-      processedMessages.add(msgId);
+      console.log('✅ Message voyageur à traiter:', msgId, '| type:', msgType, '| texte:', messageText.substring(0, 80));
 
       let roomInfo = null;
       if (propInfo && msg.roomId) {
@@ -206,9 +196,6 @@ async function fetchAndReplyBeds24Messages() {
       const aiReply = await generateAIReply(messageText, systemPrompt);
       if (aiReply) await sendBeds24Reply(token, msg, aiReply);
     }
-
-    if (nouveaux > 0) console.log('Messages traités:', nouveaux);
-
   } catch (err) {
     console.error('Erreur polling:', err.message);
   }
@@ -248,22 +235,11 @@ async function sendBeds24Reply(token, originalMessage, replyText) {
       headers: { 'token': token, 'Content-Type': 'application/json' },
       body: JSON.stringify([{ bookingId: bookingId, message: replyText, type: 'host' }])
     });
-    console.log('Réponse envoyée, status:', response.status);
+    console.log('✅ Réponse envoyée, booking:', bookingId, '| status:', response.status);
   } catch (err) {
     console.error('Erreur envoi:', err.message);
   }
 }
-
-// Routes
-app.get('/setup-beds24', async (req, res) => {
-  try {
-    const fetch = await getFetch();
-    const response = await fetch('https://beds24.com/api/v2/authentication/setup', {
-      headers: { 'code': process.env.BEDS24_TOKEN }
-    });
-    res.json(await response.json());
-  } catch (err) { res.json({ error: err.message }); }
-});
 
 app.get('/status', async (req, res) => {
   const token = await getBeds24Token();
@@ -277,6 +253,16 @@ app.get('/status', async (req, res) => {
     messagesTraités: processedMessages.size,
     agentDémarréLe: AGENT_START_TIME.toISOString()
   });
+});
+
+app.get('/setup-beds24', async (req, res) => {
+  try {
+    const fetch = await getFetch();
+    const response = await fetch('https://beds24.com/api/v2/authentication/setup', {
+      headers: { 'code': process.env.BEDS24_TOKEN }
+    });
+    res.json(await response.json());
+  } catch (err) { res.json({ error: err.message }); }
 });
 
 // Polling toutes les 2 minutes
