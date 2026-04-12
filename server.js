@@ -283,6 +283,18 @@ app.get('/test-rooms', async (req, res) => {
   } catch (err) { res.json({ error: err.message }); }
 });
 
+app.get('/test-templates', async (req, res) => {
+  try {
+    const fetch = await getFetch();
+    const token = await getBeds24Token();
+    const response = await fetch('https://beds24.com/api/v2/properties?includeAllRooms=true', {
+      headers: { 'token': token }
+    });
+    res.json(await response.json());
+  } catch (err) { res.json({ error: err.message }); }
+});
+
+
 // Polling toutes les 2 minutes
 setInterval(fetchAndReplyBeds24Messages, 2 * 60 * 1000);
 setTimeout(fetchAndReplyBeds24Messages, 10000);
