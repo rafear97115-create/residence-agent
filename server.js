@@ -5,6 +5,20 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 app.use(express.static('public'));
+app.get('/setup-beds24', async (req, res) => {
+  try {
+    const fetch = await getFetch();
+    const code = process.env.BEDS24_TOKEN;
+    const response = await fetch('https://beds24.com/api/v2/authentication/setup', {
+      headers: { 'code': code }
+    });
+    const data = await response.json();
+    console.log('Beds24 setup:', JSON.stringify(data));
+    res.json(data);
+  } catch (err) {
+    res.json({ error: err.message });
+  }
+});
 
 const SYSTEM_PROMPT = `Tu es l'agent concierge de la Résidence de l'Industrie, un ensemble de 5 logements meublés situés au 11 rue de l'Industrie, 02100 Saint-Quentin.
 
