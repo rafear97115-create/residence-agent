@@ -222,11 +222,12 @@ app.get('/status', async (req, res) => {
     messagesTraités: processedMessages.size
   });
 });
-app.get('/test-booking', async (req, res) => {
+
+app.get('/test-properties', async (req, res) => {
   try {
     const fetch = await getFetch();
     const token = await getBeds24Token();
-    const response = await fetch('https://beds24.com/api/v2/bookings?maxResults=1&includeInfoItems=true', {
+    const response = await fetch('https://beds24.com/api/v2/properties?includeAllRooms=true&includeTexts=true', {
       headers: { 'token': token }
     });
     const data = await response.json();
