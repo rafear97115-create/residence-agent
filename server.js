@@ -6,10 +6,6 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static('public'));
 
-app.get('/', (req, res) => {
-  res.json({ status: 'Agent Résidence de l\'Industrie opérationnel' });
-});
-
 app.post('/api/chat', async (req, res) => {
   try {
     const fetch = (...args) => import('node-fetch').then(({default: f}) => f(...args));
