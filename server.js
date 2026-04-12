@@ -23,10 +23,9 @@ HORAIRES :
 - Départ : avant 11h00 maximum
 - Arrivée anticipée ou départ tardif : possible selon disponibilités, demander la veille ou le jour même
 
-ACCÈS :
-- Digicode d'entrée immeuble : {DIGICODE}
+ACCÈS IMMEUBLE :
+- Digicode d'entrée : {DIGICODE}
 - Wi-Fi mot de passe : {WIFI_PASSWORD}
-- Chaque logement a une boîte à clé avec code
 - Check-in 100% autonome, codes envoyés automatiquement avant l'arrivée
 - Codes non reçus → rassurer, vérifier spams
 
@@ -102,27 +101,38 @@ async function getPropertyInfo() {
     const fetch = await getFetch();
     const token = await getBeds24Token();
     if (!token) return null;
-    const response = await fetch('https://beds24.com/api/v2/properties?includeAllRooms=true', {
+
+    // includeTexts=true est essentiel pour récupérer les templates
+    const response = await fetch('https://beds24.com/api/v2/properties?includeAllRooms=true&includeTexts=true', {
       headers: { 'token': token }
     });
     const raw = await response.json();
     const prop = raw?.data?.[0] || raw?.[0] || raw;
 
-    // Beds24 utilise roomTypes et non rooms
+    // Propriété : template1 = digicode, template2 = wifi
+    const digicode = prop?.templates?.template1 || 'voir message automatique';
+    const wifiPassword = prop?.templates?.template2 || 'voir message automatique';
+
+    // Logements : roomTypes avec includeTexts
     const roomList = prop?.roomTypes || prop?.rooms || [];
 
     propertyCache = {
-      digicode: prop?.templates?.template1 || 'voir message automatique',
-      wifi_password: prop?.templates?.template2 || 'voir message automatique',
+      digicode,
+      wifi_password: wifiPassword,
       rooms: roomList.map(room => ({
         id: room.id,
         name: room.templates?.template2 || room.name || '',
         codeBoite: room.templates?.template1 || '',
         emplacement: room.templates?.template3 || '',
+        wifi: room.templates?.template4 || wifiPassword,
       }))
     };
+
     propertyCacheTime = now;
-    console.log('Propriété chargée, logements:', propertyCache.rooms.length);
+    console.log('Propriété chargée — logements:', propertyCache.rooms.length);
+    propertyCache.rooms.forEach(r => {
+      console.log(`  > ${r.name} | boîte: ${r.codeBoite} | emplacement: ${r.emplacement}`);
+    });
     return propertyCache;
   } catch (err) {
     console.error('Erreur propriété:', err.message);
@@ -137,10 +147,11 @@ function buildSystemPrompt(propInfo, roomInfo) {
     prompt = prompt.replace('{WIFI_PASSWORD}', propInfo.wifi_password);
   }
   if (roomInfo) {
-    prompt += `\n\nINFOS LOGEMENT DU VOYAGEUR :
-- Nom : ${roomInfo.name}
+    prompt += `\n\nINFOS DU LOGEMENT DU VOYAGEUR :
+- Nom du logement : ${roomInfo.name}
 - Code boîte à clé : ${roomInfo.codeBoite}
-- Emplacement : ${roomInfo.emplacement}`;
+- Emplacement dans l'immeuble : ${roomInfo.emplacement}
+- Mot de passe Wi-Fi : ${roomInfo.wifi}`;
   }
   return prompt;
 }
@@ -170,28 +181,29 @@ async function fetchAndReplyBeds24Messages() {
     for (const msg of messages) {
       const msgId = msg.id || msg.messageId;
       if (!msgId || processedMessages.has(msgId)) continue;
-
       processedMessages.add(msgId);
 
-      // FILTRE 1 — Messages anciens
+      // Filtre date — ignorer messages anciens
       const msgTime = msg.time ? new Date(msg.time) : null;
       if (!msgTime || msgTime < AGENT_START_TIME) continue;
 
-      // FILTRE 2 — Uniquement messages voyageurs
+      // Filtre type — uniquement messages voyageurs
       const msgType = msg.type || '';
       if (msgType !== 'guest') {
-        console.log('Message ignoré (type:', msgType, ')');
+        console.log('Ignoré (type:', msgType, ')');
         continue;
       }
 
       const messageText = msg.message || msg.text || '';
       if (!messageText.trim()) continue;
 
-      console.log('✅ Message voyageur:', msgId, '| texte:', messageText.substring(0, 80));
+      console.log('✅ Message voyageur:', msgId, '|', messageText.substring(0, 80));
 
+      // Trouver le logement du voyageur
       let roomInfo = null;
       if (propInfo && msg.roomId) {
         roomInfo = propInfo.rooms.find(r => r.id === msg.roomId);
+        if (roomInfo) console.log('  Logement trouvé:', roomInfo.name);
       }
 
       const systemPrompt = buildSystemPrompt(propInfo, roomInfo);
@@ -243,6 +255,7 @@ async function sendBeds24Reply(token, originalMessage, replyText) {
   }
 }
 
+// Routes
 app.get('/status', async (req, res) => {
   const token = await getBeds24Token();
   const propInfo = await getPropertyInfo();
@@ -252,6 +265,7 @@ app.get('/status', async (req, res) => {
     digicode: propInfo?.digicode || 'non trouvé',
     wifi: propInfo?.wifi_password ? 'trouvé' : 'non trouvé',
     logements: propInfo?.rooms?.length || 0,
+    nomsLogements: propInfo?.rooms?.map(r => r.name) || [],
     messagesTraités: processedMessages.size,
     agentDémarréLe: AGENT_START_TIME.toISOString()
   });
@@ -271,7 +285,7 @@ app.get('/test-templates', async (req, res) => {
   try {
     const fetch = await getFetch();
     const token = await getBeds24Token();
-    const response = await fetch('https://beds24.com/api/v2/properties?includeAllRooms=true', {
+    const response = await fetch('https://beds24.com/api/v2/properties?includeAllRooms=true&includeTexts=true', {
       headers: { 'token': token }
     });
     res.json(await response.json());
