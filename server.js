@@ -231,19 +231,7 @@ app.get('/test-templates', async (req, res) => {
       headers: { 'token': token }
     });
     const data = await response.json();
-    const result = data.map(prop => ({
-      propId: prop.id,
-      propTemplate1: prop.texts?.template1,
-      propTemplate2: prop.texts?.template2,
-      rooms: (prop.rooms || []).map(room => ({
-        roomId: room.id,
-        roomName: room.name,
-        template1: room.texts?.template1,
-        template2: room.texts?.template2,
-        template3: room.texts?.template3,
-      }))
-    }));
-    res.json(result);
+    res.json(data);
   } catch (err) {
     res.json({ error: err.message });
   }
