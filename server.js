@@ -6,6 +6,10 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static('public'));
 
+// Date de démarrage — on ne traite que les messages APRÈS ce moment
+const AGENT_START_TIME = new Date();
+console.log('Agent démarré à:', AGENT_START_TIME.toISOString());
+
 const BASE_SYSTEM_PROMPT = `Tu es l'agent concierge de la Résidence de l'Industrie, un ensemble de 5 logements meublés situés au 11 rue de l'Industrie, 02100 Saint-Quentin.
 
 Tu réponds UNIQUEMENT en français, avec un ton chaleureux, professionnel et rassurant — comme un vrai concierge d'hôtel.
@@ -22,7 +26,7 @@ HORAIRES :
 
 ACCÈS :
 - Digicode d'entrée immeuble : {DIGICODE}
-- Wi-Fi : réseau {WIFI_NAME} / mot de passe {WIFI_PASSWORD}
+- Wi-Fi : réseau Résidence Industrie / mot de passe {WIFI_PASSWORD}
 - Chaque logement a une boîte à clé avec code
 - Check-in 100% autonome, codes envoyés automatiquement avant l'arrivée
 - Codes non reçus → rassurer, vérifier spams
@@ -85,7 +89,6 @@ async function getBeds24Token() {
       console.log('Token Beds24 renouvelé');
       return beds24Token;
     }
-    console.log('Erreur token Beds24:', JSON.stringify(data));
     return null;
   } catch (err) {
     console.error('Erreur getBeds24Token:', err.message);
@@ -93,7 +96,7 @@ async function getBeds24Token() {
   }
 }
 
-// Cache des infos propriété
+// Cache propriété
 let propertyCache = null;
 let propertyCacheTime = 0;
 
@@ -109,12 +112,11 @@ async function getPropertyInfo() {
     const response = await fetch('https://beds24.com/api/v2/properties?includeAllRooms=true', {
       headers: { 'token': token }
     });
-    const data = await response.json();
-    const prop = data?.data?.[0] || data?.[0] || data;
+    const raw = await response.json();
+    const prop = raw?.data?.[0] || raw?.[0] || raw;
 
     propertyCache = {
       digicode: prop?.templates?.template1 || 'voir message automatique',
-      wifi_name: 'Résidence Industrie',
       wifi_password: prop?.templates?.template2 || 'voir message automatique',
       rooms: (prop?.rooms || []).map(room => ({
         id: room.id,
@@ -124,7 +126,7 @@ async function getPropertyInfo() {
       }))
     };
     propertyCacheTime = now;
-    console.log('Infos propriété chargées:', JSON.stringify(propertyCache).substring(0, 200));
+    console.log('Propriété chargée, logements:', propertyCache.rooms.length);
     return propertyCache;
   } catch (err) {
     console.error('Erreur getPropertyInfo:', err.message);
@@ -134,24 +136,19 @@ async function getPropertyInfo() {
 
 function buildSystemPrompt(propInfo, roomInfo) {
   let prompt = BASE_SYSTEM_PROMPT;
-
   if (propInfo) {
     prompt = prompt.replace('{DIGICODE}', propInfo.digicode);
-    prompt = prompt.replace('{WIFI_NAME}', propInfo.wifi_name);
     prompt = prompt.replace('{WIFI_PASSWORD}', propInfo.wifi_password);
   }
-
   if (roomInfo) {
     prompt += `\n\nINFOS LOGEMENT DU VOYAGEUR :
-- Nom du logement : ${roomInfo.name}
+- Nom : ${roomInfo.name}
 - Code boîte à clé : ${roomInfo.codeBoite}
 - Emplacement : ${roomInfo.emplacement}`;
   }
-
   return prompt;
 }
 
-// Messages déjà traités
 const processedMessages = new Set();
 
 async function fetchAndReplyBeds24Messages() {
@@ -167,28 +164,39 @@ async function fetchAndReplyBeds24Messages() {
     });
 
     if (!response.ok) {
-      console.log('Erreur messages Beds24:', response.status, await response.text());
+      console.log('Erreur messages:', response.status);
       return;
     }
 
-    const data = await response.json();
-    const messages = data?.data || data;
+    const raw = await response.json();
+    const messages = raw?.data || raw;
     if (!Array.isArray(messages)) return;
 
-    console.log('Nouveaux messages non lus:', messages.length);
-
+    let nouveaux = 0;
     for (const msg of messages) {
       const msgId = msg.id || msg.messageId;
       if (!msgId || processedMessages.has(msgId)) continue;
-      if (msg.type === 'host' || msg.fromHost || msg.authorOwnerId !== null) continue;
+
+      // FILTRE DATE — ignorer les messages antérieurs au démarrage de l'agent
+      const msgTime = msg.time ? new Date(msg.time) : null;
+      if (msgTime && msgTime < AGENT_START_TIME) {
+        processedMessages.add(msgId); // Marquer comme traité sans répondre
+        continue;
+      }
+
+      // Ignorer les messages de l'hôte
+      if (msg.type === 'host' || msg.fromHost || msg.authorOwnerId !== null) {
+        processedMessages.add(msgId);
+        continue;
+      }
 
       const messageText = msg.message || msg.text || '';
       if (!messageText.trim()) continue;
 
-      console.log('Message voyageur:', msgId, '-', messageText.substring(0, 100));
+      nouveaux++;
+      console.log('Nouveau message:', msgId, '-', messageText.substring(0, 80));
       processedMessages.add(msgId);
 
-      // Trouver les infos du logement réservé
       let roomInfo = null;
       if (propInfo && msg.roomId) {
         roomInfo = propInfo.rooms.find(r => r.id === msg.roomId);
@@ -198,6 +206,9 @@ async function fetchAndReplyBeds24Messages() {
       const aiReply = await generateAIReply(messageText, systemPrompt);
       if (aiReply) await sendBeds24Reply(token, msg, aiReply);
     }
+
+    if (nouveaux > 0) console.log('Messages traités:', nouveaux);
+
   } catch (err) {
     console.error('Erreur polling:', err.message);
   }
@@ -221,9 +232,7 @@ async function generateAIReply(userMessage, systemPrompt) {
       })
     });
     const data = await response.json();
-    const reply = data.content?.[0]?.text;
-    console.log('Réponse IA:', reply?.substring(0, 100));
-    return reply || null;
+    return data.content?.[0]?.text || null;
   } catch (err) {
     console.error('Erreur IA:', err.message);
     return null;
@@ -241,17 +250,16 @@ async function sendBeds24Reply(token, originalMessage, replyText) {
     });
     console.log('Réponse envoyée, status:', response.status);
   } catch (err) {
-    console.error('Erreur envoi réponse:', err.message);
+    console.error('Erreur envoi:', err.message);
   }
 }
 
-// Routes utilitaires
+// Routes
 app.get('/setup-beds24', async (req, res) => {
   try {
     const fetch = await getFetch();
-    const code = process.env.BEDS24_TOKEN;
     const response = await fetch('https://beds24.com/api/v2/authentication/setup', {
-      headers: { 'code': code }
+      headers: { 'code': process.env.BEDS24_TOKEN }
     });
     res.json(await response.json());
   } catch (err) { res.json({ error: err.message }); }
@@ -264,36 +272,23 @@ app.get('/status', async (req, res) => {
     beds24: token ? 'connecté' : 'déconnecté',
     anthropic: process.env.ANTHROPIC_KEY ? 'configuré' : 'manquant',
     digicode: propInfo?.digicode || 'non trouvé',
-    wifi: propInfo?.wifi_password || 'non trouvé',
+    wifi: propInfo?.wifi_password ? 'trouvé' : 'non trouvé',
     logements: propInfo?.rooms?.length || 0,
-    messagesTraités: processedMessages.size
+    messagesTraités: processedMessages.size,
+    agentDémarréLe: AGENT_START_TIME.toISOString()
   });
-});
-
-app.get('/test-templates', async (req, res) => {
-  try {
-    const fetch = await getFetch();
-    const token = await getBeds24Token();
-    const response = await fetch('https://beds24.com/api/v2/properties?includeAllRooms=true', {
-      headers: { 'token': token }
-    });
-    res.json(await response.json());
-  } catch (err) { res.json({ error: err.message }); }
 });
 
 // Polling toutes les 2 minutes
 setInterval(fetchAndReplyBeds24Messages, 2 * 60 * 1000);
-setTimeout(fetchAndReplyBeds24Messages, 8000);
+setTimeout(fetchAndReplyBeds24Messages, 10000);
 
 // Chat web
 app.post('/api/chat', async (req, res) => {
   try {
     const fetch = await getFetch();
     const propInfo = await getPropertyInfo();
-    const systemPrompt = buildSystemPrompt(propInfo, null);
-
-    const body = { ...req.body, system: systemPrompt };
-
+    const body = { ...req.body, system: buildSystemPrompt(propInfo, null) };
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
@@ -303,10 +298,8 @@ app.post('/api/chat', async (req, res) => {
       },
       body: JSON.stringify(body)
     });
-    const data = await response.json();
-    res.json(data);
+    res.json(await response.json());
   } catch (err) {
-    console.error('Erreur chat:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
