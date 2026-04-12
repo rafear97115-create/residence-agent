@@ -93,6 +93,16 @@ async function getBeds24Token() {
   }
 }
 
+{
+  "environment": {
+    "time": {
+      "now": "2026-04-13T16:20:00+02:00",
+      "timezone": "Europe/Paris",
+      "date": "2026-04-13"
+    }
+  }
+}
+
 let propertyCache = null;
 let propertyCacheTime = 0;
 
