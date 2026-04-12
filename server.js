@@ -107,12 +107,16 @@ async function getPropertyInfo() {
     });
     const raw = await response.json();
     const prop = raw?.data?.[0] || raw?.[0] || raw;
+
+    // Beds24 utilise roomTypes et non rooms
+    const roomList = prop?.roomTypes || prop?.rooms || [];
+
     propertyCache = {
       digicode: prop?.templates?.template1 || 'voir message automatique',
       wifi_password: prop?.templates?.template2 || 'voir message automatique',
-      rooms: (prop?.rooms || []).map(room => ({
+      rooms: roomList.map(room => ({
         id: room.id,
-        name: room.templates?.template2 || room.name,
+        name: room.templates?.template2 || room.name || '',
         codeBoite: room.templates?.template1 || '',
         emplacement: room.templates?.template3 || '',
       }))
@@ -167,15 +171,13 @@ async function fetchAndReplyBeds24Messages() {
       const msgId = msg.id || msg.messageId;
       if (!msgId || processedMessages.has(msgId)) continue;
 
-      // Toujours marquer comme traité pour éviter la boucle
       processedMessages.add(msgId);
 
-      // FILTRE 1 — Ignorer les messages anciens (avant démarrage agent)
+      // FILTRE 1 — Messages anciens
       const msgTime = msg.time ? new Date(msg.time) : null;
       if (!msgTime || msgTime < AGENT_START_TIME) continue;
 
-      // FILTRE 2 — Ignorer TOUS les messages qui ne sont pas de type "guest"
-      // type peut être: "guest", "host", "internal", "system", "airbnb", "booking"
+      // FILTRE 2 — Uniquement messages voyageurs
       const msgType = msg.type || '';
       if (msgType !== 'guest') {
         console.log('Message ignoré (type:', msgType, ')');
@@ -185,7 +187,7 @@ async function fetchAndReplyBeds24Messages() {
       const messageText = msg.message || msg.text || '';
       if (!messageText.trim()) continue;
 
-      console.log('✅ Message voyageur à traiter:', msgId, '| type:', msgType, '| texte:', messageText.substring(0, 80));
+      console.log('✅ Message voyageur:', msgId, '| texte:', messageText.substring(0, 80));
 
       let roomInfo = null;
       if (propInfo && msg.roomId) {
@@ -265,24 +267,6 @@ app.get('/setup-beds24', async (req, res) => {
   } catch (err) { res.json({ error: err.message }); }
 });
 
-app.get('/test-rooms', async (req, res) => {
-  try {
-    const fetch = await getFetch();
-    const token = await getBeds24Token();
-    const response = await fetch('https://beds24.com/api/v2/properties?includeAllRooms=true', {
-      headers: { 'token': token }
-    });
-    const raw = await response.json();
-    // Montrer la structure complète
-    res.json({
-      typeDeReponse: typeof raw,
-      estTableau: Array.isArray(raw),
-      clesDisponibles: Object.keys(raw || {}),
-      apercu: JSON.stringify(raw).substring(0, 500)
-    });
-  } catch (err) { res.json({ error: err.message }); }
-});
-
 app.get('/test-templates', async (req, res) => {
   try {
     const fetch = await getFetch();
@@ -293,7 +277,6 @@ app.get('/test-templates', async (req, res) => {
     res.json(await response.json());
   } catch (err) { res.json({ error: err.message }); }
 });
-
 
 // Polling toutes les 2 minutes
 setInterval(fetchAndReplyBeds24Messages, 2 * 60 * 1000);
