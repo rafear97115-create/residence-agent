@@ -13,7 +13,7 @@ Tu es disponible 24h/24 et tu dois toujours apporter une réponse utile et compl
 
 ADRESSE : 11 rue de l'Industrie, 02100 Saint-Quentin
 CONTACT PANNE/INCIDENT (non-urgent) : 06 62 52 43 81
-EMAIL : contact@locations-residence-industrie.fr
+
 
 HORAIRES :
 - Arrivée : à partir de 15h00 (check-in autonome)
@@ -221,6 +221,19 @@ app.get('/status', async (req, res) => {
     anthropic: process.env.ANTHROPIC_KEY ? 'configuré' : 'manquant',
     messagesTraités: processedMessages.size
   });
+});
+app.get('/test-booking', async (req, res) => {
+  try {
+    const fetch = await getFetch();
+    const token = await getBeds24Token();
+    const response = await fetch('https://beds24.com/api/v2/bookings?maxResults=1&includeInfoItems=true', {
+      headers: { 'token': token }
+    });
+    const data = await response.json();
+    res.json(data);
+  } catch (err) {
+    res.json({ error: err.message });
+  }
 });
 
 // Vérifier les messages toutes les 2 minutes
