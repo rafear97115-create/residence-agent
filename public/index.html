@@ -1,0 +1,631 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agent Voyageur — Résidence de l'Industrie</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600;700&family=DM+Serif+Display:ital@0;1&display=swap');
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  :root {
+    --bg: #0f0f0f;
+    --surface: #1a1a1a;
+    --surface2: #242424;
+    --border: #2e2e2e;
+    --accent: #c8a96e;
+    --accent2: #e8c98e;
+    --text: #f0ece4;
+    --muted: #8a8480;
+    --green: #4caf7d;
+    --red: #e05c5c;
+    --user-bubble: #1e2d1e;
+    --agent-bubble: #1e1e2a;
+  }
+
+  body {
+    font-family: 'DM Sans', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* HEADER */
+  header {
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    padding: 16px 24px;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+  }
+
+  .header-icon {
+    width: 42px;
+    height: 42px;
+    border-radius: 12px;
+    background: linear-gradient(135deg, #c8a96e, #8b6914);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 20px;
+    flex-shrink: 0;
+  }
+
+  .header-info h1 {
+    font-family: 'DM Serif Display', serif;
+    font-size: 16px;
+    color: var(--text);
+    font-weight: 400;
+  }
+
+  .header-info p {
+    font-size: 12px;
+    color: var(--muted);
+    margin-top: 2px;
+  }
+
+  .status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--green);
+    display: inline-block;
+    margin-right: 5px;
+    animation: pulse 2s infinite;
+  }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+
+  .header-badge {
+    margin-left: auto;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    padding: 5px 12px;
+    font-size: 11px;
+    color: var(--accent);
+    font-weight: 600;
+    letter-spacing: 0.05em;
+  }
+
+  /* CHAT AREA */
+  .chat-wrapper {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    max-width: 780px;
+    width: 100%;
+    margin: 0 auto;
+    padding: 0 16px;
+  }
+
+  .messages {
+    flex: 1;
+    padding: 24px 0;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    min-height: calc(100vh - 200px);
+  }
+
+  /* SYSTEM MESSAGE */
+  .system-msg {
+    text-align: center;
+    font-size: 11px;
+    color: var(--muted);
+    padding: 6px 16px;
+    background: var(--surface);
+    border-radius: 20px;
+    align-self: center;
+    border: 1px solid var(--border);
+  }
+
+  /* MESSAGE BUBBLES */
+  .msg {
+    display: flex;
+    gap: 10px;
+    align-items: flex-end;
+    animation: fadeUp 0.3s ease forwards;
+    opacity: 0;
+  }
+
+  @keyframes fadeUp {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  .msg.agent { flex-direction: row; }
+  .msg.user { flex-direction: row-reverse; }
+
+  .avatar {
+    width: 32px;
+    height: 32px;
+    border-radius: 10px;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 15px;
+  }
+
+  .avatar.agent-av {
+    background: linear-gradient(135deg, #c8a96e33, #c8a96e22);
+    border: 1px solid #c8a96e44;
+  }
+
+  .avatar.user-av {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+  }
+
+  .bubble {
+    max-width: 75%;
+    padding: 12px 16px;
+    border-radius: 16px;
+    font-size: 14px;
+    line-height: 1.6;
+  }
+
+  .msg.agent .bubble {
+    background: var(--agent-bubble);
+    border: 1px solid #2a2a3a;
+    border-bottom-left-radius: 4px;
+    color: var(--text);
+  }
+
+  .msg.user .bubble {
+    background: var(--user-bubble);
+    border: 1px solid #2a3a2a;
+    border-bottom-right-radius: 4px;
+    color: var(--text);
+  }
+
+  .bubble .timestamp {
+    display: block;
+    font-size: 10px;
+    color: var(--muted);
+    margin-top: 6px;
+    text-align: right;
+  }
+
+  /* TYPING INDICATOR */
+  .typing {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+  }
+
+  .typing-dots {
+    background: var(--agent-bubble);
+    border: 1px solid #2a2a3a;
+    border-radius: 16px;
+    border-bottom-left-radius: 4px;
+    padding: 14px 18px;
+    display: flex;
+    gap: 5px;
+    align-items: center;
+  }
+
+  .typing-dots span {
+    width: 6px;
+    height: 6px;
+    background: var(--muted);
+    border-radius: 50%;
+    animation: bounce 1.2s infinite;
+  }
+  .typing-dots span:nth-child(2) { animation-delay: 0.2s; }
+  .typing-dots span:nth-child(3) { animation-delay: 0.4s; }
+
+  @keyframes bounce {
+    0%, 60%, 100% { transform: translateY(0); }
+    30% { transform: translateY(-6px); }
+  }
+
+  /* QUICK REPLIES */
+  .quick-replies {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 4px 0 8px 42px;
+  }
+
+  .qr-btn {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    padding: 7px 14px;
+    font-size: 12px;
+    color: var(--accent);
+    cursor: pointer;
+    transition: all 0.2s;
+    font-family: 'DM Sans', sans-serif;
+  }
+
+  .qr-btn:hover {
+    background: var(--accent);
+    color: var(--bg);
+    border-color: var(--accent);
+  }
+
+  /* INPUT */
+  .input-area {
+    position: sticky;
+    bottom: 0;
+    background: var(--bg);
+    padding: 16px 0 24px;
+    border-top: 1px solid var(--border);
+  }
+
+  .input-row {
+    display: flex;
+    gap: 10px;
+    align-items: flex-end;
+  }
+
+  textarea {
+    flex: 1;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 12px 16px;
+    color: var(--text);
+    font-family: 'DM Sans', sans-serif;
+    font-size: 14px;
+    resize: none;
+    min-height: 48px;
+    max-height: 140px;
+    line-height: 1.5;
+    transition: border-color 0.2s;
+    outline: none;
+  }
+
+  textarea:focus { border-color: var(--accent); }
+  textarea::placeholder { color: var(--muted); }
+
+  .send-btn {
+    width: 48px;
+    height: 48px;
+    border-radius: 14px;
+    background: var(--accent);
+    border: none;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.2s;
+    flex-shrink: 0;
+  }
+
+  .send-btn:hover { background: var(--accent2); transform: scale(1.05); }
+  .send-btn:active { transform: scale(0.97); }
+
+  .send-btn svg { width: 20px; height: 20px; fill: var(--bg); }
+
+  /* INFO PANEL */
+  .info-cards {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+    margin: 4px 0 16px 42px;
+  }
+
+  .info-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 12px 14px;
+    font-size: 12px;
+  }
+
+  .info-card .ic-label {
+    color: var(--muted);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    margin-bottom: 4px;
+  }
+
+  .info-card .ic-value {
+    color: var(--text);
+    font-weight: 500;
+  }
+
+  .info-card .ic-value.gold { color: var(--accent); }
+
+  /* DISCLAIMER */
+  .disclaimer {
+    font-size: 11px;
+    color: var(--muted);
+    text-align: center;
+    padding: 8px 0 0;
+  }
+
+  /* LOADING */
+  #loading {
+    display: none;
+  }
+
+  /* SCROLLBAR */
+  ::-webkit-scrollbar { width: 4px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="header-icon">🏠</div>
+  <div class="header-info">
+    <h1>Agent Concierge — Résidence de l'Industrie</h1>
+    <p><span class="status-dot"></span>En ligne · Répond en quelques secondes</p>
+  </div>
+  <div class="header-badge">IA ACTIVE</div>
+</header>
+
+<div class="chat-wrapper">
+  <div class="messages" id="messages">
+
+    <div class="system-msg">Aujourd'hui · Agent IA opérationnel</div>
+
+    <!-- Message de bienvenue -->
+    <div class="msg agent" style="animation-delay:0.1s">
+      <div class="avatar agent-av">🏠</div>
+      <div>
+        <div class="bubble">
+          Bonjour et bienvenue à la <strong>Résidence de l'Industrie</strong> ! 👋<br><br>
+          Je suis votre assistant disponible <strong>24h/24 et 7j/7</strong>. Je peux vous aider pour toutes vos questions concernant votre séjour au <em>11 rue de l'Industrie, Saint-Quentin</em>.<br><br>
+          Comment puis-je vous aider ?
+          <span class="timestamp">maintenant</span>
+        </div>
+        <div class="info-cards">
+          <div class="info-card">
+            <div class="ic-label">Arrivée</div>
+            <div class="ic-value">À partir de 15h00</div>
+          </div>
+          <div class="info-card">
+            <div class="ic-label">Départ</div>
+            <div class="ic-value">Avant 11h00</div>
+          </div>
+          <div class="info-card">
+            <div class="ic-label">Check-in</div>
+            <div class="ic-value gold">100% autonome</div>
+          </div>
+          <div class="info-card">
+            <div class="ic-label">Urgence / Panne</div>
+            <div class="ic-value">06 62 52 43 81</div>
+          </div>
+        </div>
+        <div class="quick-replies">
+          <button class="qr-btn" onclick="sendQuick('Comment accéder au logement ?')">🔑 Accès & codes</button>
+          <button class="qr-btn" onclick="sendQuick('Arrivée anticipée possible ?')">⏰ Arrivée anticipée</button>
+          <button class="qr-btn" onclick="sendQuick('Que faire en cas de panne ?')">🔧 Panne / incident</button>
+          <button class="qr-btn" onclick="sendQuick('Y a-t-il du parking ?')">🚗 Parking</button>
+          <button class="qr-btn" onclick="sendQuick('Quels équipements sont disponibles ?')">🛋️ Équipements</button>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <div class="input-area">
+    <div class="input-row">
+      <textarea
+        id="userInput"
+        placeholder="Posez votre question…"
+        rows="1"
+        onkeydown="handleKey(event)"
+        oninput="autoResize(this)"
+      ></textarea>
+      <button class="send-btn" onclick="sendMessage()">
+        <svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
+      </button>
+    </div>
+    <div class="disclaimer">Agent IA · Résidence de l'Industrie · Saint-Quentin</div>
+  </div>
+</div>
+
+<script>
+const SYSTEM_PROMPT = `Tu es l'agent concierge de la Résidence de l'Industrie, un ensemble de 5 logements meublés situés au 11 rue de l'Industrie, 02100 Saint-Quentin.
+
+Tu réponds UNIQUEMENT en français, avec un ton chaleureux, professionnel et rassurant — comme un vrai concierge d'hôtel.
+Tu es disponible 24h/24 et tu dois toujours apporter une réponse utile et complète.
+
+=== INFORMATIONS CLÉS ===
+
+ADRESSE : 11 rue de l'Industrie, 02100 Saint-Quentin
+CONTACT PANNE/INCIDENT (non-urgent) : 06 62 52 43 81
+EMAIL : contact@locations-residence-industrie.fr
+
+HORAIRES :
+- Arrivée : à partir de 15h00 (check-in autonome)
+- Départ : avant 11h00 maximum
+- Arrivée anticipée ou départ tardif : possible selon disponibilités, demander la veille ou le jour même
+
+ACCÈS :
+- L'immeuble dispose d'un digicode d'entrée
+- Chaque logement a une boîte à clé avec code
+- Le check-in est 100% autonome, les codes sont envoyés automatiquement avant l'arrivée
+- Si les codes ne sont pas reçus : rassurer le voyageur, lui dire qu'ils arrivent très prochainement
+
+LOGEMENTS :
+- 5 logements dans le même immeuble
+- Chaque logement a sa propre chambre, cuisine équipée, salle de bain
+- Tous les équipements sont neufs (résidence récente)
+- Wi-Fi haut débit inclus
+- Linge de maison inclus (draps, serviettes)
+- Kitchenette : micro-ondes, réfrigérateur, cafetière
+- Parking : stationnement gratuit dans la rue devant l'immeuble (pas de parking privé)
+- Sécurité 24h/24
+- Détecteurs de fumée
+
+MÉNAGE :
+- La femme de ménage passe systématiquement après chaque départ
+- Des frais de ménage sont obligatoires
+- Pour les séjours longs (ex: 2 semaines), un passage en cours de séjour peut être organisé
+- Le linge (draps, serviettes) est fourni — le voyageur n'a pas besoin d'en apporter
+
+RÈGLES :
+- Respect du sommeil des autres voyageurs (pas d'arrivée trop tardive)
+- Ne pas toucher aux colis déposés dans les parties communes
+- Durée max : 90 jours
+- Réductions pour clients réguliers / fidèles
+
+PANNES & INCIDENTS :
+- En cas de panne, problème technique, dégât : donner le numéro 06 62 52 43 81
+- Préciser que ce n'est pas une ligne d'urgence vitale mais un service de dépannage
+- Toujours s'excuser pour le désagrément et assurer une prise en charge rapide
+
+PAIEMENT :
+- Si un paiement a échoué : informer le voyageur qu'il doit finaliser via la plateforme (Airbnb/Booking), sinon la réservation sera annulée
+
+DISPONIBILITÉS :
+- Si quelqu'un demande si c'est disponible : s'il peut réserver sur la plateforme, c'est disponible
+- Ne jamais promettre de disponibilité sans vérification
+- Pour des dates précises : orienter vers le site www.locations-residence-industrie.fr ou Airbnb/Booking
+
+FIDÉLISATION :
+- Les clients fidèles sont récompensés (réductions, gestes commerciaux)
+- Toujours encourager à revenir et à laisser un commentaire
+
+=== SITUATIONS TYPES ===
+
+1. "Je n'ai pas reçu mes codes" → Rassurer, dire que les codes arrivent automatiquement, vérifier dans les spams, ils sont envoyés quelques heures avant l'arrivée
+
+2. "Je veux arriver avant 15h" → Possible selon disponibilités, demander de reposer la question la veille ou le jour même pour confirmation
+
+3. "Le chauffage ne fonctionne pas / il fait froid" → S'excuser, donner le 06 62 52 43 81, assurer une intervention rapide
+
+4. "Y a-t-il une machine à laver ?" → Il y a une laverie à moins de 10 minutes à pied
+
+5. "Je veux partir après 11h" → Départ tardif possible selon disponibilités (même règle qu'arrivée anticipée), sinon une nuit supplémentaire est nécessaire
+
+6. "C'est quoi les frais de ménage ?" → Obligatoires pour garantir la propreté et le professionnalisme, permettent à la femme de ménage d'intervenir entre chaque voyageur
+
+7. "Il y a des colis devant ma porte" → Ne pas y toucher, la femme de ménage passera les récupérer
+
+8. Agent de ménage se présente → Message de bienvenue, elle sera là à partir de 11h
+
+=== STYLE DE RÉPONSE ===
+- Toujours commencer par le prénom du voyageur si connu
+- Ton chaleureux mais professionnel
+- Phrases courtes et claires
+- Terminer par "N'hésitez pas si vous avez d'autres questions" ou similaire
+- En cas d'excuses : sincère mais bref, toujours proposer une solution
+- Ne JAMAIS inventer d'informations non mentionnées ici
+- Si tu ne sais pas : rediriger vers contact@locations-residence-industrie.fr ou le 06 62 52 43 81`;
+
+let conversationHistory = [];
+
+function getTime() {
+  return new Date().toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
+}
+
+function autoResize(el) {
+  el.style.height = 'auto';
+  el.style.height = Math.min(el.scrollHeight, 140) + 'px';
+}
+
+function handleKey(e) {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    sendMessage();
+  }
+}
+
+function sendQuick(text) {
+  document.getElementById('userInput').value = text;
+  sendMessage();
+}
+
+function addMessage(role, content, delay = 0) {
+  const messages = document.getElementById('messages');
+  const time = getTime();
+
+  if (role === 'typing') {
+    const div = document.createElement('div');
+    div.className = 'msg agent';
+    div.id = 'typing-indicator';
+    div.style.animationDelay = delay + 's';
+    div.innerHTML = `
+      <div class="avatar agent-av">🏠</div>
+      <div class="typing-dots">
+        <span></span><span></span><span></span>
+      </div>`;
+    messages.appendChild(div);
+    messages.scrollTop = messages.scrollHeight;
+    return;
+  }
+
+  const existing = document.getElementById('typing-indicator');
+  if (existing) existing.remove();
+
+  const div = document.createElement('div');
+  div.className = `msg ${role}`;
+  div.style.animationDelay = delay + 's';
+
+  const avatar = role === 'agent'
+    ? `<div class="avatar agent-av">🏠</div>`
+    : `<div class="avatar user-av">👤</div>`;
+
+  const bubbleClass = role === 'agent' ? '' : '';
+  div.innerHTML = `
+    ${role === 'agent' ? avatar : ''}
+    <div class="bubble">${content.replace(/\n/g, '<br>')}<span class="timestamp">${time}</span></div>
+    ${role === 'user' ? avatar : ''}
+  `;
+
+  messages.appendChild(div);
+  messages.scrollTop = messages.scrollHeight;
+}
+
+async function sendMessage() {
+  const input = document.getElementById('userInput');
+  const text = input.value.trim();
+  if (!text) return;
+
+  input.value = '';
+  input.style.height = 'auto';
+
+  addMessage('user', text);
+
+  conversationHistory.push({ role: 'user', content: text });
+
+  addMessage('typing');
+
+  try {
+    const response = await fetch('https://residence-agent.onrender.com/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 1000,
+        system: SYSTEM_PROMPT,
+        messages: conversationHistory
+      })
+    });
+
+    const data = await response.json();
+    const reply = data.content?.[0]?.text || "Je suis désolé, je n'ai pas pu traiter votre demande. Veuillez contacter le 06 62 52 43 81.";
+
+    conversationHistory.push({ role: 'assistant', content: reply });
+
+    addMessage('agent', reply);
+
+  } catch (err) {
+    addMessage('agent', "Je rencontre un problème technique momentané. Pour toute urgence, contactez le <strong>06 62 52 43 81</strong> ou écrivez à <strong>contact@locations-residence-industrie.fr</strong>.");
+  }
+}
+</script>
+
+</body>
+</html>
