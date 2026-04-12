@@ -13,7 +13,7 @@ app.post('/api/chat', async (req, res) => {
       'Content-Type': 'application/json',
       'x-api-key': process.env.ANTHROPIC_KEY,
       'anthropic-version': '2023-06-01',
-	'anthropic-dangerous-direct-brouwser-acces': 'true'
+	'anthropic-dangerous-direct-browser-access': 'true'
     },
     body: JSON.stringify(req.body)
   });
