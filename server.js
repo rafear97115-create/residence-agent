@@ -462,13 +462,82 @@ app.get('/test-templates', async (req, res) => {
 setInterval(fetchAndReplyBeds24Messages, 2 * 60 * 1000);
 setTimeout(fetchAndReplyBeds24Messages, 10000);
 
+// Vérifier identité voyageur par nom + date d'arrivée
+async function verifyGuestByNameAndDate(guestName, checkInDate) {
+  try {
+    const fetch = await getFetch();
+    const token = await getBeds24Token();
+    if (!token || !guestName) return null;
+
+    // Chercher par nom dans les réservations
+    const response = await fetch(
+      `https://beds24.com/api/v2/bookings?searchString=${encodeURIComponent(guestName)}&status=confirmed&maxResults=20`,
+      { headers: { 'token': token } }
+    );
+    const raw = await response.json();
+    const bookings = raw?.data || raw;
+    if (!Array.isArray(bookings) || bookings.length === 0) return null;
+
+    // Si date fournie, affiner la recherche
+    if (checkInDate) {
+      const targetDate = new Date(checkInDate);
+      const match = bookings.find(b => {
+        const checkin = new Date(b.checkIn || b.firstNight);
+        return Math.abs(checkin - targetDate) < 2 * 24 * 60 * 60 * 1000; // ±2 jours
+      });
+      if (match) return match;
+    }
+
+    // Sinon retourner la réservation la plus récente correspondant au nom
+    const now = new Date();
+    const active = bookings.find(b => {
+      const checkin = new Date(b.checkIn || b.firstNight);
+      const checkout = new Date(b.checkOut || b.lastNight);
+      return checkin <= now && checkout >= now;
+    });
+    return active || bookings[0] || null;
+  } catch (err) {
+    console.error('Erreur vérification voyageur:', err.message);
+    return null;
+  }
+}
+
 app.post('/api/chat', async (req, res) => {
   try {
     const fetch = await getFetch();
     const propInfo = await getPropertyInfo();
-    const activeBooking = await getActiveBooking(null);
-    const isLoyal = false; // Chat web = pas d'email connu
-    const body = { ...req.body, system: buildSystemPrompt(propInfo, null, !!activeBooking, isLoyal) };
+
+    // Extraire nom et date depuis le contexte de conversation si fournis
+    const guestName = req.body.guestName || null;
+    const guestDate = req.body.guestDate || null;
+
+    let activeBooking = null;
+    let roomInfo = null;
+
+    if (guestName) {
+      // Vérifier l'identité du voyageur
+      activeBooking = await verifyGuestByNameAndDate(guestName, guestDate);
+      if (activeBooking && propInfo) {
+        roomInfo = propInfo.rooms.find(r => r.id === activeBooking.roomId);
+      }
+      console.log(`Chat web - Voyageur: ${guestName} | Réservation: ${!!activeBooking}`);
+    }
+
+    const guestEmail = activeBooking?.guestEmail || activeBooking?.email || null;
+    const bookingCount = await countGuestBookings(guestEmail);
+    const isLoyal = bookingCount >= 3;
+
+    const systemPromptText = buildSystemPrompt(propInfo, roomInfo, !!activeBooking, isLoyal);
+
+    // Ajouter instruction d'identification si pas encore identifié
+    const finalSystem = !guestName
+      ? systemPromptText + `\n\nIDENTIFICATION : Si le voyageur demande des codes d'accès ou des informations sensibles, demande-lui d'abord de se présenter : son nom et sa date d'arrivée. Explique-lui que c'est pour vérifier sa réservation et assurer sa sécurité. Une fois qu'il donne ces infos, le système les vérifiera automatiquement.`
+      : systemPromptText;
+
+    const body = { ...req.body, system: finalSystem };
+    delete body.guestName;
+    delete body.guestDate;
+
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
@@ -478,7 +547,14 @@ app.post('/api/chat', async (req, res) => {
       },
       body: JSON.stringify(body)
     });
-    res.json(await response.json());
+    const data = await response.json();
+
+    // Retourner aussi le statut de vérification
+    res.json({
+      ...data,
+      verified: !!activeBooking,
+      guestVerified: !!activeBooking
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
