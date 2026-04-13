@@ -67,10 +67,11 @@ NE JAMAIS donner l'adresse email de contact.
 STYLE : français uniquement, chaleureux et professionnel, phrases courtes, toujours proposer une solution, ne jamais inventer d'informations`;
 
 const RULES_WITH_BOOKING = `Le voyageur a une réservation ACTIVE ou arrive dans les 24h.
-Tu PEUX lui communiquer (seulement si demandé) :
-- Le digicode de l'immeuble : {DIGICODE}
-- Le mot de passe Wi-Fi : {WIFI_PASSWORD}
-- Le code de sa boîte à clé et son emplacement (voir infos logement)`;
+Si le voyageur demande les codes d'accès, donne-les LUI DIRECTEMENT et immédiatement sans redirection :
+- Digicode de l'immeuble : {DIGICODE}
+- Mot de passe Wi-Fi : {WIFI_PASSWORD}
+- Code boîte à clé et emplacement : voir infos logement ci-dessous
+Ne JAMAIS dire que les codes seront envoyés automatiquement si tu les as déjà — donne-les directement.`;
 
 const RULES_WITHOUT_BOOKING = `Le voyageur N'A PAS de réservation active ou confirmée dans les 24h.
 Tu NE DOIS PAS communiquer :
