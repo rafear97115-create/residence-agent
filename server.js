@@ -19,22 +19,11 @@ Tu es disponible 24h/24 et tu dois toujours apporter une réponse utile et compl
 DATE ET HEURE ACTUELLES : {DATETIME}
 
 ADRESSE : 11 rue de l'Industrie, 02100 Saint-Quentin
-CONTACT PANNE/INCIDENT (non-urgent) : 06 62 52 43 81
-EMAIL : contact@locations-residence-industrie.fr
 
 HORAIRES :
 - Arrivée : à partir de 15h00 (check-in autonome)
 - Départ : avant 11h00 maximum
 - Arrivée anticipée ou départ tardif : possible selon disponibilités, demander la veille ou le jour même
-
-ACCÈS IMMEUBLE :
-- Digicode d'entrée : {DIGICODE}
-- Wi-Fi mot de passe : {WIFI_PASSWORD}
-- Check-in 100% autonome, codes envoyés automatiquement avant l'arrivée
-- Codes non reçus → rassurer, vérifier spams
-
-RÈGLE IMPORTANTE SUR LES CODES :
-{CODE_RULE}
 
 LOGEMENTS :
 - 5 logements dans le même immeuble
@@ -58,13 +47,40 @@ RÈGLES :
 - Durée max : 90 jours
 - Réductions clients réguliers
 
-PANNES : donner le 06 62 52 43 81, s'excuser, assurer prise en charge rapide
-PAIEMENT échoué : finaliser via Airbnb/Booking sinon annulation
-DISPONIBILITÉS : orienter vers www.locations-residence-industrie.fr
 MACHINE À LAVER : laverie à moins de 10 min à pied
+DISPONIBILITÉS : orienter vers www.locations-residence-industrie.fr
 FIDÉLISATION : clients fidèles récompensés, encourager à revenir et laisser un commentaire
 
+=== RÈGLES STRICTES DE SÉCURITÉ ===
+
+{SECURITY_RULES}
+
+=== RÈGLE SUR LE NUMÉRO D'URGENCE ===
+Le numéro 06 62 52 43 81 NE DOIT ÊTRE DONNÉ QUE si le voyageur signale explicitement :
+- Une panne (chauffage, électricité, eau, équipement)
+- Un incident technique dans le logement
+- Un dégât (fuite d'eau, problème urgent)
+Dans tous les autres cas, NE PAS donner ce numéro.
+NE JAMAIS donner l'adresse email de contact.
+
 STYLE : français uniquement, chaleureux et professionnel, phrases courtes, toujours proposer une solution, ne jamais inventer d'informations`;
+
+const RULES_WITH_BOOKING = `Le voyageur a une réservation ACTIVE ou arrive dans les 24h.
+Tu PEUX lui communiquer :
+- Le digicode de l'immeuble : {DIGICODE}
+- Le mot de passe Wi-Fi : {WIFI_PASSWORD}
+- Le code de sa boîte à clé et son emplacement (voir infos logement ci-dessous)
+Ces informations ne doivent être données QUE si le voyageur les demande explicitement.`;
+
+const RULES_WITHOUT_BOOKING = `Le voyageur N'A PAS de réservation active ou confirmée dans les 24h.
+Tu NE DOIS ABSOLUMENT PAS communiquer :
+- Le digicode de l'immeuble
+- Le mot de passe Wi-Fi
+- Les codes de boîtes à clé
+- Le numéro 06 62 52 43 81
+- L'adresse email
+Si on te demande ces informations, réponds poliment :
+"Ces informations vous seront envoyées automatiquement sur la plateforme de réservation dans les heures précédant votre arrivée. Si vous n'avez pas encore réservé, vous pouvez le faire sur www.locations-residence-industrie.fr"`;
 
 function getDatetime() {
   return new Date().toLocaleString('fr-FR', {
@@ -127,8 +143,8 @@ async function getPropertyInfo() {
     const prop = raw?.data?.[0] || raw?.[0] || raw;
     const roomList = prop?.roomTypes || prop?.rooms || [];
     propertyCache = {
-      digicode: prop?.templates?.template1 || 'voir message automatique',
-      wifi_password: prop?.templates?.template2 || 'voir message automatique',
+      digicode: prop?.templates?.template1 || '',
+      wifi_password: prop?.templates?.template2 || '',
       rooms: roomList.map(room => ({
         id: room.id,
         name: room.templates?.template2 || room.name || '',
@@ -146,7 +162,6 @@ async function getPropertyInfo() {
   }
 }
 
-// Vérifier si une réservation est active (en cours ou arrivée dans les 24h)
 async function getActiveBooking(roomId) {
   try {
     const fetch = await getFetch();
@@ -155,20 +170,15 @@ async function getActiveBooking(roomId) {
 
     const now = new Date();
     const tomorrow = new Date(now.getTime() + 24 * 60 * 60 * 1000);
-
     const dateFrom = now.toISOString().split('T')[0];
     const dateTo = tomorrow.toISOString().split('T')[0];
 
     const url = `https://beds24.com/api/v2/bookings?checkInFrom=${dateFrom}&checkOutTo=${dateTo}&status=confirmed`;
-    const response = await fetch(url, {
-      headers: { 'token': token }
-    });
-
+    const response = await fetch(url, { headers: { 'token': token } });
     const raw = await response.json();
     const bookings = raw?.data || raw;
     if (!Array.isArray(bookings)) return null;
 
-    // Trouver une réservation active pour ce logement
     const active = bookings.find(b => {
       const checkin = new Date(b.checkIn || b.firstNight);
       const checkout = new Date(b.checkOut || b.lastNight);
@@ -186,25 +196,18 @@ async function getActiveBooking(roomId) {
 
 function buildSystemPrompt(propInfo, roomInfo, hasActiveBooking) {
   let prompt = BASE_SYSTEM_PROMPT;
-
-  // Injecter la date et heure actuelles
   prompt = prompt.replace('{DATETIME}', getDatetime());
 
-  if (propInfo) {
-    prompt = prompt.replace('{DIGICODE}', propInfo.digicode);
-    prompt = prompt.replace('{WIFI_PASSWORD}', propInfo.wifi_password);
-  }
-
-  // Règle sur les codes selon la réservation
-  if (hasActiveBooking) {
-    prompt = prompt.replace('{CODE_RULE}',
-      'Le voyageur a une réservation active ou arrive dans les 24h. Tu PEUX lui communiquer le digicode, le code de la boîte à clé et toutes les informations d\'accès.');
+  if (hasActiveBooking && propInfo) {
+    let rules = RULES_WITH_BOOKING;
+    rules = rules.replace('{DIGICODE}', propInfo.digicode);
+    rules = rules.replace('{WIFI_PASSWORD}', propInfo.wifi_password);
+    prompt = prompt.replace('{SECURITY_RULES}', rules);
   } else {
-    prompt = prompt.replace('{CODE_RULE}',
-      'IMPORTANT : Ce voyageur n\'a PAS de réservation active ou confirmée à venir dans les 24h. Tu NE DOIS PAS communiquer le digicode, les codes de boîtes à clé, ni aucun code d\'accès. Si on te demande ces codes, réponds poliment que ces informations sont envoyées automatiquement 24h avant l\'arrivée via la plateforme de réservation.');
+    prompt = prompt.replace('{SECURITY_RULES}', RULES_WITHOUT_BOOKING);
   }
 
-  if (roomInfo) {
+  if (roomInfo && hasActiveBooking) {
     prompt += `\n\nINFOS DU LOGEMENT DU VOYAGEUR :
 - Nom : ${roomInfo.name}
 - Code boîte à clé : ${roomInfo.codeBoite}
@@ -221,7 +224,6 @@ app.get('/webhook', (req, res) => {
   const mode = req.query['hub.mode'];
   const token = req.query['hub.verify_token'];
   const challenge = req.query['hub.challenge'];
-  console.log('Webhook verification:', mode, token);
   if (mode === 'subscribe' && token === WEBHOOK_VERIFY_TOKEN) {
     console.log('✅ Webhook WhatsApp vérifié !');
     res.status(200).send(challenge);
@@ -235,23 +237,19 @@ app.post('/webhook', async (req, res) => {
   try {
     const body = req.body;
     if (body.object !== 'whatsapp_business_account') return;
-
     for (const entry of body.entry || []) {
       for (const change of entry.changes || []) {
         const messages = change.value?.messages;
         if (!messages) continue;
-
         for (const message of messages) {
           if (message.type !== 'text') continue;
           const from = message.from;
           const text = message.text?.body || '';
-          console.log('📱 WhatsApp message de:', from, '|', text.substring(0, 80));
-
+          console.log('📱 WhatsApp de:', from, '|', text.substring(0, 80));
           const propInfo = await getPropertyInfo();
           const activeBooking = await getActiveBooking(null);
           const systemPrompt = buildSystemPrompt(propInfo, null, !!activeBooking);
           const aiReply = await generateAIReply(text, systemPrompt);
-
           if (aiReply) {
             await sendWhatsAppReply(from, aiReply);
             await notifyOwner(from, text, aiReply);
@@ -269,20 +267,12 @@ async function sendWhatsAppReply(to, message) {
     const fetch = await getFetch();
     const phoneId = process.env.WHATSAPP_PHONE_ID;
     const token = process.env.WHATSAPP_TOKEN;
-    const response = await fetch(`https://graph.facebook.com/v18.0/${phoneId}/messages`, {
+    await fetch(`https://graph.facebook.com/v18.0/${phoneId}/messages`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${token}`
-      },
-      body: JSON.stringify({
-        messaging_product: 'whatsapp',
-        to: to,
-        type: 'text',
-        text: { body: message }
-      })
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+      body: JSON.stringify({ messaging_product: 'whatsapp', to, type: 'text', text: { body: message } })
     });
-    console.log('✅ Réponse WhatsApp envoyée à:', to, '| status:', response.status);
+    console.log('✅ WhatsApp envoyé à:', to);
   } catch (err) {
     console.error('Erreur envoi WhatsApp:', err.message);
   }
@@ -292,8 +282,8 @@ async function notifyOwner(from, question, reply) {
   try {
     const ownerNumber = process.env.OWNER_PHONE;
     if (!ownerNumber) return;
-    const notification = `📱 WhatsApp\nDe: +${from}\nQuestion: ${question.substring(0, 100)}\nRéponse: ${reply.substring(0, 150)}`;
-    await sendWhatsAppReply(ownerNumber, notification);
+    const msg = `📱 WhatsApp\nDe: +${from}\nQuestion: ${question.substring(0, 100)}\nRéponse: ${reply.substring(0, 150)}`;
+    await sendWhatsAppReply(ownerNumber, msg);
   } catch (err) {
     console.error('Erreur notification:', err.message);
   }
@@ -333,17 +323,15 @@ async function fetchAndReplyBeds24Messages() {
       const messageText = msg.message || msg.text || '';
       if (!messageText.trim()) continue;
 
-      console.log('✅ Message Beds24:', msgId, '|', messageText.substring(0, 80));
+      console.log('✅ Beds24:', msgId, '|', messageText.substring(0, 80));
 
       let roomInfo = null;
       if (propInfo && msg.roomId) roomInfo = propInfo.rooms.find(r => r.id === msg.roomId);
 
-      // Vérifier si réservation active pour ce logement
       const activeBooking = await getActiveBooking(msg.roomId);
-      const systemPrompt = buildSystemPrompt(propInfo, roomInfo, !!activeBooking);
-
       console.log('Réservation active:', !!activeBooking);
 
+      const systemPrompt = buildSystemPrompt(propInfo, roomInfo, !!activeBooking);
       const aiReply = await generateAIReply(messageText, systemPrompt);
       if (aiReply) await sendBeds24Reply(token, msg, aiReply);
     }
@@ -386,7 +374,7 @@ async function sendBeds24Reply(token, originalMessage, replyText) {
       headers: { 'token': token, 'Content-Type': 'application/json' },
       body: JSON.stringify([{ bookingId: bookingId, message: replyText, type: 'host' }])
     });
-    console.log('✅ Réponse Beds24 envoyée, booking:', bookingId);
+    console.log('✅ Beds24 réponse envoyée, booking:', bookingId);
   } catch (err) {
     console.error('Erreur envoi Beds24:', err.message);
   }
@@ -401,7 +389,6 @@ app.get('/status', async (req, res) => {
     beds24: token ? 'connecté' : 'déconnecté',
     anthropic: process.env.ANTHROPIC_KEY ? 'configuré' : 'manquant',
     whatsapp: process.env.WHATSAPP_TOKEN ? 'configuré' : 'manquant',
-    digicode: propInfo?.digicode || 'non trouvé',
     logements: propInfo?.rooms?.length || 0,
     messagesTraités: processedMessages.size,
     agentDémarréLe: AGENT_START_TIME.toISOString(),
@@ -430,11 +417,9 @@ app.get('/test-templates', async (req, res) => {
   } catch (err) { res.json({ error: err.message }); }
 });
 
-// Polling Beds24 toutes les 2 minutes
 setInterval(fetchAndReplyBeds24Messages, 2 * 60 * 1000);
 setTimeout(fetchAndReplyBeds24Messages, 10000);
 
-// Chat web
 app.post('/api/chat', async (req, res) => {
   try {
     const fetch = await getFetch();
