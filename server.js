@@ -459,6 +459,35 @@ app.get('/test-templates', async (req, res) => {
   } catch (err) { res.json({ error: err.message }); }
 });
 
+app.get('/test-properties', async (req, res) => {
+  try {
+    const fetch = await getFetch();
+    const token = await getBeds24Token();
+    const response = await fetch('https://beds24.com/api/v2/properties?includeAllRooms=true&includeTexts=true', {
+      headers: { 'token': token }
+    });
+    const data = await response.json();
+    res.json(data);
+  } catch (err) {
+    res.json({ error: err.message });
+  }
+});
+
+app.get('/test-booking', async (req, res) => {
+  try {
+    const fetch = await getFetch();
+    const token = await getBeds24Token();
+    const response = await fetch('https://beds24.com/api/v2/bookings?maxResults=1&includeInfoItems=true', {
+      headers: { 'token': token }
+    });
+    const data = await response.json();
+    res.json(data);
+  } catch (err) {
+    res.json({ error: err.message });
+  }
+});
+
+
 setInterval(fetchAndReplyBeds24Messages, 2 * 60 * 1000);
 setTimeout(fetchAndReplyBeds24Messages, 10000);
 
