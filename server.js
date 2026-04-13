@@ -265,20 +265,6 @@ app.get('/webhook', (req, res) => {
   }
 });
 
-app.get('/test-booking', async (req, res) => {
-  try {
-    const fetch = await getFetch();
-    const token = await getBeds24Token();
-    const response = await fetch('https://beds24.com/api/v2/bookings?maxResults=1&includeInfoItems=true', {
-      headers: { 'token': token }
-    });
-    const data = await response.json();
-    res.json(data);
-  } catch (err) {
-    res.json({ error: err.message });
-  }
-});
-
 app.post('/webhook', async (req, res) => {
   res.sendStatus(200);
   try {
@@ -483,33 +469,63 @@ async function verifyGuestByNameAndDate(guestName, checkInDate) {
     const token = await getBeds24Token();
     if (!token || !guestName) return null;
 
-    // Chercher par nom dans les réservations
+    const now = new Date();
+    const nameLower = guestName.toLowerCase().trim();
+    const nameParts = nameLower.split(/\s+/);
+
+    // Récupérer les réservations confirmées avec infos personnelles
     const response = await fetch(
-      `https://beds24.com/api/v2/bookings?searchString=${encodeURIComponent(guestName)}&status=confirmed&maxResults=20`,
+      `https://beds24.com/api/v2/bookings?searchString=${encodeURIComponent(guestName)}&status=confirmed&maxResults=50`,
       { headers: { 'token': token } }
     );
     const raw = await response.json();
     const bookings = raw?.data || raw;
-    if (!Array.isArray(bookings) || bookings.length === 0) return null;
-
-    // Si date fournie, affiner la recherche
-    if (checkInDate) {
-      const targetDate = new Date(checkInDate);
-      const match = bookings.find(b => {
-        const checkin = new Date(b.checkIn || b.firstNight);
-        return Math.abs(checkin - targetDate) < 2 * 24 * 60 * 60 * 1000; // ±2 jours
-      });
-      if (match) return match;
+    if (!Array.isArray(bookings) || bookings.length === 0) {
+      console.log('Aucune réservation trouvée pour:', guestName);
+      return null;
     }
 
-    // Sinon retourner la réservation la plus récente correspondant au nom
-    const now = new Date();
-    const active = bookings.find(b => {
-      const checkin = new Date(b.checkIn || b.firstNight);
-      const checkout = new Date(b.checkOut || b.lastNight);
+    console.log(`${bookings.length} réservations trouvées pour "${guestName}"`);
+
+    // Filtrer par correspondance de nom (firstName ou lastName)
+    const nameMatches = bookings.filter(b => {
+      const fn = (b.firstName || '').toLowerCase();
+      const ln = (b.lastName || '').toLowerCase();
+      const fullName = `${fn} ${ln}`.trim();
+      return nameParts.some(part => part.length > 2 && (fn.includes(part) || ln.includes(part) || fullName.includes(part)));
+    });
+
+    if (nameMatches.length === 0) {
+      console.log('Aucune correspondance de nom pour:', guestName);
+      return null;
+    }
+
+    // Si date fournie, affiner
+    if (checkInDate) {
+      const targetDate = new Date(checkInDate);
+      if (!isNaN(targetDate)) {
+        const match = nameMatches.find(b => {
+          const checkin = new Date(b.arrival || b.checkIn || b.firstNight);
+          return Math.abs(checkin - targetDate) < 3 * 24 * 60 * 60 * 1000;
+        });
+        if (match) return match;
+      }
+    }
+
+    // Priorité à la réservation active (en cours aujourd'hui)
+    const active = nameMatches.find(b => {
+      const checkin = new Date(b.arrival || b.checkIn || b.firstNight);
+      const checkout = new Date(b.departure || b.checkOut || b.lastNight);
       return checkin <= now && checkout >= now;
     });
-    return active || bookings[0] || null;
+    if (active) return active;
+
+    // Sinon réservation à venir dans les 24h
+    const upcoming = nameMatches.find(b => {
+      const checkin = new Date(b.arrival || b.checkIn || b.firstNight);
+      return checkin > now && checkin <= new Date(now.getTime() + 24 * 60 * 60 * 1000);
+    });
+    return upcoming || null;
   } catch (err) {
     console.error('Erreur vérification voyageur:', err.message);
     return null;
@@ -543,10 +559,16 @@ app.post('/api/chat', async (req, res) => {
 
     const systemPromptText = buildSystemPrompt(propInfo, roomInfo, !!activeBooking, isLoyal);
 
-    // Ajouter instruction d'identification si pas encore identifié
-    const finalSystem = !guestName
-      ? systemPromptText + `\n\nIDENTIFICATION : Si le voyageur demande des codes d'accès ou des informations sensibles, demande-lui d'abord de se présenter : son nom et sa date d'arrivée. Explique-lui que c'est pour vérifier sa réservation et assurer sa sécurité. Une fois qu'il donne ces infos, le système les vérifiera automatiquement.`
-      : systemPromptText;
+
+    // Instruction selon statut d'identification
+    let finalSystem;
+    if (!guestName) {
+      finalSystem = systemPromptText + `\n\nIDENTIFICATION OBLIGATOIRE : Si le voyageur demande des codes, le digicode, le wifi ou toute info sensible, demande-lui OBLIGATOIREMENT son nom complet et sa date d'arrivee. NE DONNE AUCUN CODE avant verification.`;
+    } else if (!activeBooking) {
+      finalSystem = systemPromptText + `\n\nVERIFICATION ECHOUEE : Aucune reservation trouvee pour ce nom. NE PAS donner les codes. Repondre : Je ne trouve pas de reservation a ce nom. Verifiez l'orthographe ou consultez votre confirmation sur la plateforme de reservation.`;
+    } else {
+      finalSystem = systemPromptText;
+    }
 
     const body = { ...req.body, system: finalSystem };
     delete body.guestName;
