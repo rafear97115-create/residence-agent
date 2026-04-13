@@ -48,14 +48,12 @@ RÈGLES :
 - Réductions clients réguliers
 
 MACHINE À LAVER : laverie à moins de 10 min à pied
-DISPONIBILITÉS : orienter vers www.locations-residence-industrie.fr
-FIDÉLISATION : clients fidèles récompensés, encourager à revenir et laisser un commentaire
 
-=== RÈGLES STRICTES DE SÉCURITÉ ===
+=== RÈGLES STRICTES ===
 
 {SECURITY_RULES}
 
-=== RÈGLE SUR LE NUMÉRO D'URGENCE ===
+=== NUMÉRO D'URGENCE ===
 Le numéro 06 62 52 43 81 NE DOIT ÊTRE DONNÉ QUE si le voyageur signale explicitement :
 - Une panne (chauffage, électricité, eau, équipement)
 - Un incident technique dans le logement
@@ -63,24 +61,29 @@ Le numéro 06 62 52 43 81 NE DOIT ÊTRE DONNÉ QUE si le voyageur signale explic
 Dans tous les autres cas, NE PAS donner ce numéro.
 NE JAMAIS donner l'adresse email de contact.
 
+=== SITE INTERNET ===
+{SITE_RULE}
+
 STYLE : français uniquement, chaleureux et professionnel, phrases courtes, toujours proposer une solution, ne jamais inventer d'informations`;
 
 const RULES_WITH_BOOKING = `Le voyageur a une réservation ACTIVE ou arrive dans les 24h.
-Tu PEUX lui communiquer :
+Tu PEUX lui communiquer (seulement si demandé) :
 - Le digicode de l'immeuble : {DIGICODE}
 - Le mot de passe Wi-Fi : {WIFI_PASSWORD}
-- Le code de sa boîte à clé et son emplacement (voir infos logement ci-dessous)
-Ces informations ne doivent être données QUE si le voyageur les demande explicitement.`;
+- Le code de sa boîte à clé et son emplacement (voir infos logement)`;
 
 const RULES_WITHOUT_BOOKING = `Le voyageur N'A PAS de réservation active ou confirmée dans les 24h.
-Tu NE DOIS ABSOLUMENT PAS communiquer :
-- Le digicode de l'immeuble
+Tu NE DOIS PAS communiquer :
+- Le digicode
 - Le mot de passe Wi-Fi
 - Les codes de boîtes à clé
 - Le numéro 06 62 52 43 81
 - L'adresse email
-Si on te demande ces informations, réponds poliment :
-"Ces informations vous seront envoyées automatiquement sur la plateforme de réservation dans les heures précédant votre arrivée. Si vous n'avez pas encore réservé, vous pouvez le faire sur www.locations-residence-industrie.fr"`;
+Si on te demande ces infos : "Ces informations vous seront envoyées automatiquement avant votre arrivée via la plateforme de réservation."`;
+
+const SITE_RULE_LOYAL = `Ce voyageur a effectué 3 réservations ou plus. Tu peux lui mentionner, EN FIN DE MESSAGE UNIQUEMENT et de façon naturelle, qu'il peut bénéficier d'un tarif préférentiel en réservant directement sur www.locations-residence-industrie.fr pour son prochain séjour.`;
+
+const SITE_RULE_DEFAULT = `NE PAS mentionner le site internet www.locations-residence-industrie.fr dans tes réponses.`;
 
 function getDatetime() {
   return new Date().toLocaleString('fr-FR', {
@@ -194,10 +197,35 @@ async function getActiveBooking(roomId) {
   }
 }
 
-function buildSystemPrompt(propInfo, roomInfo, hasActiveBooking) {
+// Compter les réservations passées d'un voyageur par email
+async function countGuestBookings(guestEmail) {
+  if (!guestEmail) return 0;
+  try {
+    const fetch = await getFetch();
+    const token = await getBeds24Token();
+    if (!token) return 0;
+
+    const response = await fetch(
+      `https://beds24.com/api/v2/bookings?searchString=${encodeURIComponent(guestEmail)}&maxResults=100`,
+      { headers: { 'token': token } }
+    );
+    const raw = await response.json();
+    const bookings = raw?.data || raw;
+    if (!Array.isArray(bookings)) return 0;
+
+    console.log(`Réservations trouvées pour ${guestEmail}: ${bookings.length}`);
+    return bookings.length;
+  } catch (err) {
+    console.error('Erreur comptage réservations:', err.message);
+    return 0;
+  }
+}
+
+function buildSystemPrompt(propInfo, roomInfo, hasActiveBooking, isLoyalGuest) {
   let prompt = BASE_SYSTEM_PROMPT;
   prompt = prompt.replace('{DATETIME}', getDatetime());
 
+  // Règles de sécurité
   if (hasActiveBooking && propInfo) {
     let rules = RULES_WITH_BOOKING;
     rules = rules.replace('{DIGICODE}', propInfo.digicode);
@@ -207,6 +235,10 @@ function buildSystemPrompt(propInfo, roomInfo, hasActiveBooking) {
     prompt = prompt.replace('{SECURITY_RULES}', RULES_WITHOUT_BOOKING);
   }
 
+  // Règle site internet
+  prompt = prompt.replace('{SITE_RULE}', isLoyalGuest ? SITE_RULE_LOYAL : SITE_RULE_DEFAULT);
+
+  // Infos logement
   if (roomInfo && hasActiveBooking) {
     prompt += `\n\nINFOS DU LOGEMENT DU VOYAGEUR :
 - Nom : ${roomInfo.name}
@@ -218,7 +250,7 @@ function buildSystemPrompt(propInfo, roomInfo, hasActiveBooking) {
   return prompt;
 }
 
-// ==================== WHATSAPP WEBHOOK ====================
+// ==================== WHATSAPP ====================
 
 app.get('/webhook', (req, res) => {
   const mode = req.query['hub.mode'];
@@ -246,9 +278,14 @@ app.post('/webhook', async (req, res) => {
           const from = message.from;
           const text = message.text?.body || '';
           console.log('📱 WhatsApp de:', from, '|', text.substring(0, 80));
+
           const propInfo = await getPropertyInfo();
           const activeBooking = await getActiveBooking(null);
-          const systemPrompt = buildSystemPrompt(propInfo, null, !!activeBooking);
+          const guestEmail = activeBooking?.guestEmail || activeBooking?.email || null;
+          const bookingCount = await countGuestBookings(guestEmail);
+          const isLoyal = bookingCount >= 3;
+
+          const systemPrompt = buildSystemPrompt(propInfo, null, !!activeBooking, isLoyal);
           const aiReply = await generateAIReply(text, systemPrompt);
           if (aiReply) {
             await sendWhatsAppReply(from, aiReply);
@@ -329,9 +366,13 @@ async function fetchAndReplyBeds24Messages() {
       if (propInfo && msg.roomId) roomInfo = propInfo.rooms.find(r => r.id === msg.roomId);
 
       const activeBooking = await getActiveBooking(msg.roomId);
-      console.log('Réservation active:', !!activeBooking);
+      const guestEmail = activeBooking?.guestEmail || activeBooking?.email || null;
+      const bookingCount = await countGuestBookings(guestEmail);
+      const isLoyal = bookingCount >= 3;
 
-      const systemPrompt = buildSystemPrompt(propInfo, roomInfo, !!activeBooking);
+      console.log(`Réservation active: ${!!activeBooking} | Email: ${guestEmail} | Réservations: ${bookingCount} | Fidèle: ${isLoyal}`);
+
+      const systemPrompt = buildSystemPrompt(propInfo, roomInfo, !!activeBooking, isLoyal);
       const aiReply = await generateAIReply(messageText, systemPrompt);
       if (aiReply) await sendBeds24Reply(token, msg, aiReply);
     }
@@ -425,7 +466,8 @@ app.post('/api/chat', async (req, res) => {
     const fetch = await getFetch();
     const propInfo = await getPropertyInfo();
     const activeBooking = await getActiveBooking(null);
-    const body = { ...req.body, system: buildSystemPrompt(propInfo, null, !!activeBooking) };
+    const isLoyal = false; // Chat web = pas d'email connu
+    const body = { ...req.body, system: buildSystemPrompt(propInfo, null, !!activeBooking, isLoyal) };
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
