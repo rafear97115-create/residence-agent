@@ -588,6 +588,48 @@ function addMessage(role, content, delay = 0) {
   messages.scrollTop = messages.scrollHeight;
 }
 
+// Extraction du nom et de la date depuis le texte
+let detectedGuestName = null;
+let detectedGuestDate = null;
+let guestVerified = false;
+
+function extractGuestInfo(text) {
+  // Détecter un nom (après "je suis", "je m'appelle", "c'est", "monsieur", "madame")
+  const namePatterns = [
+    /je suis (?:m[rs]\.?\s+)?([A-ZÀ-Ü][a-zà-ü]+(?:\s+[A-ZÀ-Ü][a-zà-ü]+)?)/i,
+    /je m'appelle (?:m[rs]\.?\s+)?([A-ZÀ-Ü][a-zà-ü]+(?:\s+[A-ZÀ-Ü][a-zà-ü]+)?)/i,
+    /(?:monsieur|madame|m\.|mme\.?)\s+([A-ZÀ-Ü][A-ZÀ-Üa-zà-ü]+)/i,
+    /(?:^|\s)([A-ZÀ-Ü]{2,}(?:\s+[A-ZÀ-Ü]{2,})?)/,
+  ];
+
+  // Détecter une date (formats: 13/04, 13 avril, avril 13, etc.)
+  const datePatterns = [
+    /(\d{1,2})[\/\-](\d{1,2})(?:[\/\-]\d{2,4})?/,
+    /(\d{1,2})\s+(?:janvier|février|mars|avril|mai|juin|juillet|août|septembre|octobre|novembre|décembre)/i,
+    /(?:janvier|février|mars|avril|mai|juin|juillet|août|septembre|octobre|novembre|décembre)\s+(\d{1,2})/i,
+  ];
+
+  if (!detectedGuestName) {
+    for (const pattern of namePatterns) {
+      const match = text.match(pattern);
+      if (match && match[1] && match[1].length > 2) {
+        detectedGuestName = match[1].trim();
+        break;
+      }
+    }
+  }
+
+  if (!detectedGuestDate) {
+    for (const pattern of datePatterns) {
+      const match = text.match(pattern);
+      if (match) {
+        detectedGuestDate = text;
+        break;
+      }
+    }
+  }
+}
+
 async function sendMessage() {
   const input = document.getElementById('userInput');
   const text = input.value.trim();
@@ -597,32 +639,43 @@ async function sendMessage() {
   input.style.height = 'auto';
 
   addMessage('user', text);
-
   conversationHistory.push({ role: 'user', content: text });
-
   addMessage('typing');
 
+  // Extraire infos voyageur du message
+  extractGuestInfo(text);
+
   try {
+    const payload = {
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 1000,
+      messages: conversationHistory
+    };
+
+    // Ajouter nom et date si détectés
+    if (detectedGuestName) payload.guestName = detectedGuestName;
+    if (detectedGuestDate) payload.guestDate = detectedGuestDate;
+
     const response = await fetch('/api/chat', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json'},
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-20250514',
-        max_tokens: 1000,
-        system: SYSTEM_PROMPT,
-        messages: conversationHistory
-      })
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
     });
 
     const data = await response.json();
-    const reply = data.content?.[0]?.text || "Je suis désolé, je n'ai pas pu traiter votre demande. Veuillez contacter le 06 62 52 43 81.";
 
+    // Mettre à jour le statut de vérification
+    if (data.guestVerified && !guestVerified) {
+      guestVerified = true;
+      console.log('✅ Voyageur vérifié:', detectedGuestName);
+    }
+
+    const reply = data.content?.[0]?.text || "Je suis désolé, je n'ai pas pu traiter votre demande.";
     conversationHistory.push({ role: 'assistant', content: reply });
-
     addMessage('agent', reply);
 
   } catch (err) {
-    addMessage('agent', "Je rencontre un problème technique momentané. Pour toute urgence, contactez le <strong>06 62 52 43 81</strong> ou écrivez à <strong>contact@locations-residence-industrie.fr</strong>.");
+    addMessage('agent', "Je rencontre un problème technique momentané.");
   }
 }
 </script>
