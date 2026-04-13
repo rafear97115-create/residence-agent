@@ -448,11 +448,11 @@ app.get('/setup-beds24', async (req, res) => {
   } catch (err) { res.json({ error: err.message }); }
 });
 
-app.get('/test-templates', async (req, res) => {
+app.get('/test-messages', async (req, res) => {
   try {
     const fetch = await getFetch();
     const token = await getBeds24Token();
-    const response = await fetch('https://beds24.com/api/v2/properties?includeAllRooms=true&includeTexts=true', {
+    const response = await fetch('https://beds24.com/api/v2/bookings/messages?maxResults=2', {
       headers: { 'token': token }
     });
     res.json(await response.json());
@@ -486,6 +486,44 @@ app.get('/test-booking', async (req, res) => {
     res.json({ error: err.message });
   }
 });
+
+app.get('/test-templates', async (req, res) => {
+  try {
+    const fetch = await getFetch();
+    const token = await getBeds24Token();
+    const response = await fetch('https://beds24.com/api/v2/properties?includeAllRooms=true&includeTexts=true', {
+      headers: { 'token': token }
+    });
+    const data = await response.json();
+    const result = data.map(prop => ({
+      propId: prop.id,
+      propTemplate1: prop.texts?.template1,
+      propTemplate2: prop.texts?.template2,
+      rooms: (prop.rooms || []).map(room => ({
+        roomId: room.id,
+        roomName: room.name,
+        template1: room.texts?.template1,
+        template2: room.texts?.template2,
+        template3: room.texts?.template3,
+      }))
+    }));
+    res.json(result);
+  } catch (err) {
+    res.json({ error: err.message });
+  }
+});
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 setInterval(fetchAndReplyBeds24Messages, 2 * 60 * 1000);
