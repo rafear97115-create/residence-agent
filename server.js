@@ -265,6 +265,20 @@ app.get('/webhook', (req, res) => {
   }
 });
 
+app.get('/test-booking', async (req, res) => {
+  try {
+    const fetch = await getFetch();
+    const token = await getBeds24Token();
+    const response = await fetch('https://beds24.com/api/v2/bookings?maxResults=1&includeInfoItems=true', {
+      headers: { 'token': token }
+    });
+    const data = await response.json();
+    res.json(data);
+  } catch (err) {
+    res.json({ error: err.message });
+  }
+});
+
 app.post('/webhook', async (req, res) => {
   res.sendStatus(200);
   try {
