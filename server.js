@@ -13,8 +13,10 @@ const WEBHOOK_VERIFY_TOKEN = 'residence2026';
 
 const BASE_SYSTEM_PROMPT = `Tu es l'agent concierge de la Résidence de l'Industrie, un ensemble de 5 logements meublés situés au 11 rue de l'Industrie, 02100 Saint-Quentin.
 
-Tu réponds UNIQUEMENT en français, avec un ton chaleureux, professionnel et rassurant — comme un vrai concierge d'hôtel. Tu ne donnes pas le digicode de l'immeuble à moins que la reservation soit effective. Tu donnes le contact panne uniquement si le voyageur demande.
-Tu es disponible 24h/24 et tu dois toujours apporter une réponse utile et complète. N'envoie pas l'adresse email de contact à moins qu'in te demande.
+Tu réponds UNIQUEMENT en français, avec un ton chaleureux, professionnel et rassurant — comme un vrai concierge d'hôtel.
+Tu es disponible 24h/24 et tu dois toujours apporter une réponse utile et complète.
+
+DATE ET HEURE ACTUELLES : {DATETIME}
 
 ADRESSE : 11 rue de l'Industrie, 02100 Saint-Quentin
 CONTACT PANNE/INCIDENT (non-urgent) : 06 62 52 43 81
@@ -30,6 +32,9 @@ ACCÈS IMMEUBLE :
 - Wi-Fi mot de passe : {WIFI_PASSWORD}
 - Check-in 100% autonome, codes envoyés automatiquement avant l'arrivée
 - Codes non reçus → rassurer, vérifier spams
+
+RÈGLE IMPORTANTE SUR LES CODES :
+{CODE_RULE}
 
 LOGEMENTS :
 - 5 logements dans le même immeuble
@@ -57,9 +62,21 @@ PANNES : donner le 06 62 52 43 81, s'excuser, assurer prise en charge rapide
 PAIEMENT échoué : finaliser via Airbnb/Booking sinon annulation
 DISPONIBILITÉS : orienter vers www.locations-residence-industrie.fr
 MACHINE À LAVER : laverie à moins de 10 min à pied
-FIDÉLISATION : clients fidèles récompensés, encourager à revenir et laisser un commentaire, après 3 reservations
+FIDÉLISATION : clients fidèles récompensés, encourager à revenir et laisser un commentaire
 
 STYLE : français uniquement, chaleureux et professionnel, phrases courtes, toujours proposer une solution, ne jamais inventer d'informations`;
+
+function getDatetime() {
+  return new Date().toLocaleString('fr-FR', {
+    timeZone: 'Europe/Paris',
+    weekday: 'long',
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit'
+  });
+}
 
 async function getFetch() {
   const { default: fetch } = await import('node-fetch');
@@ -92,8 +109,6 @@ async function getBeds24Token() {
     return null;
   }
 }
-
-
 
 let propertyCache = null;
 let propertyCacheTime = 0;
@@ -131,12 +146,64 @@ async function getPropertyInfo() {
   }
 }
 
-function buildSystemPrompt(propInfo, roomInfo) {
+// Vérifier si une réservation est active (en cours ou arrivée dans les 24h)
+async function getActiveBooking(roomId) {
+  try {
+    const fetch = await getFetch();
+    const token = await getBeds24Token();
+    if (!token) return null;
+
+    const now = new Date();
+    const tomorrow = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+
+    const dateFrom = now.toISOString().split('T')[0];
+    const dateTo = tomorrow.toISOString().split('T')[0];
+
+    const url = `https://beds24.com/api/v2/bookings?checkInFrom=${dateFrom}&checkOutTo=${dateTo}&status=confirmed`;
+    const response = await fetch(url, {
+      headers: { 'token': token }
+    });
+
+    const raw = await response.json();
+    const bookings = raw?.data || raw;
+    if (!Array.isArray(bookings)) return null;
+
+    // Trouver une réservation active pour ce logement
+    const active = bookings.find(b => {
+      const checkin = new Date(b.checkIn || b.firstNight);
+      const checkout = new Date(b.checkOut || b.lastNight);
+      const isActive = checkin <= tomorrow && checkout >= now;
+      const matchRoom = !roomId || b.roomId === roomId;
+      return isActive && matchRoom;
+    });
+
+    return active || null;
+  } catch (err) {
+    console.error('Erreur vérification réservation:', err.message);
+    return null;
+  }
+}
+
+function buildSystemPrompt(propInfo, roomInfo, hasActiveBooking) {
   let prompt = BASE_SYSTEM_PROMPT;
+
+  // Injecter la date et heure actuelles
+  prompt = prompt.replace('{DATETIME}', getDatetime());
+
   if (propInfo) {
     prompt = prompt.replace('{DIGICODE}', propInfo.digicode);
     prompt = prompt.replace('{WIFI_PASSWORD}', propInfo.wifi_password);
   }
+
+  // Règle sur les codes selon la réservation
+  if (hasActiveBooking) {
+    prompt = prompt.replace('{CODE_RULE}',
+      'Le voyageur a une réservation active ou arrive dans les 24h. Tu PEUX lui communiquer le digicode, le code de la boîte à clé et toutes les informations d\'accès.');
+  } else {
+    prompt = prompt.replace('{CODE_RULE}',
+      'IMPORTANT : Ce voyageur n\'a PAS de réservation active ou confirmée à venir dans les 24h. Tu NE DOIS PAS communiquer le digicode, les codes de boîtes à clé, ni aucun code d\'accès. Si on te demande ces codes, réponds poliment que ces informations sont envoyées automatiquement 24h avant l\'arrivée via la plateforme de réservation.');
+  }
+
   if (roomInfo) {
     prompt += `\n\nINFOS DU LOGEMENT DU VOYAGEUR :
 - Nom : ${roomInfo.name}
@@ -144,32 +211,27 @@ function buildSystemPrompt(propInfo, roomInfo) {
 - Emplacement : ${roomInfo.emplacement}
 - Wifi : ${roomInfo.wifi}`;
   }
+
   return prompt;
 }
 
 // ==================== WHATSAPP WEBHOOK ====================
 
-// Vérification du webhook par Meta
 app.get('/webhook', (req, res) => {
   const mode = req.query['hub.mode'];
   const token = req.query['hub.verify_token'];
   const challenge = req.query['hub.challenge'];
-
   console.log('Webhook verification:', mode, token);
-
   if (mode === 'subscribe' && token === WEBHOOK_VERIFY_TOKEN) {
     console.log('✅ Webhook WhatsApp vérifié !');
     res.status(200).send(challenge);
   } else {
-    console.log('❌ Token invalide');
     res.sendStatus(403);
   }
 });
 
-// Réception des messages WhatsApp
 app.post('/webhook', async (req, res) => {
-  res.sendStatus(200); // Répondre immédiatement à Meta
-
+  res.sendStatus(200);
   try {
     const body = req.body;
     if (body.object !== 'whatsapp_business_account') return;
@@ -181,20 +243,17 @@ app.post('/webhook', async (req, res) => {
 
         for (const message of messages) {
           if (message.type !== 'text') continue;
-
-          const from = message.from; // Numéro du voyageur
+          const from = message.from;
           const text = message.text?.body || '';
-          const msgId = message.id;
-
           console.log('📱 WhatsApp message de:', from, '|', text.substring(0, 80));
 
           const propInfo = await getPropertyInfo();
-          const systemPrompt = buildSystemPrompt(propInfo, null);
+          const activeBooking = await getActiveBooking(null);
+          const systemPrompt = buildSystemPrompt(propInfo, null, !!activeBooking);
           const aiReply = await generateAIReply(text, systemPrompt);
 
           if (aiReply) {
             await sendWhatsAppReply(from, aiReply);
-            // Notifier le propriétaire
             await notifyOwner(from, text, aiReply);
           }
         }
@@ -210,7 +269,6 @@ async function sendWhatsAppReply(to, message) {
     const fetch = await getFetch();
     const phoneId = process.env.WHATSAPP_PHONE_ID;
     const token = process.env.WHATSAPP_TOKEN;
-
     const response = await fetch(`https://graph.facebook.com/v18.0/${phoneId}/messages`, {
       method: 'POST',
       headers: {
@@ -224,10 +282,7 @@ async function sendWhatsAppReply(to, message) {
         text: { body: message }
       })
     });
-
-    const data = await response.json();
     console.log('✅ Réponse WhatsApp envoyée à:', to, '| status:', response.status);
-    return data;
   } catch (err) {
     console.error('Erreur envoi WhatsApp:', err.message);
   }
@@ -235,14 +290,12 @@ async function sendWhatsAppReply(to, message) {
 
 async function notifyOwner(from, question, reply) {
   try {
-    // Notifier le numéro principal du propriétaire
-    const ownerNumber = process.env.OWNER_PHONE; // ex: 33763781915
+    const ownerNumber = process.env.OWNER_PHONE;
     if (!ownerNumber) return;
-
-    const notification = `📱 Nouveau message WhatsApp\n\nDe: +${from}\nQuestion: ${question.substring(0, 100)}\n\nRéponse agent: ${reply.substring(0, 150)}`;
+    const notification = `📱 WhatsApp\nDe: +${from}\nQuestion: ${question.substring(0, 100)}\nRéponse: ${reply.substring(0, 150)}`;
     await sendWhatsAppReply(ownerNumber, notification);
   } catch (err) {
-    console.error('Erreur notification propriétaire:', err.message);
+    console.error('Erreur notification:', err.message);
   }
 }
 
@@ -260,7 +313,6 @@ async function fetchAndReplyBeds24Messages() {
     const response = await fetch('https://beds24.com/api/v2/bookings/messages?maxResults=50', {
       headers: { 'token': token }
     });
-
     if (!response.ok) return;
 
     const raw = await response.json();
@@ -286,7 +338,12 @@ async function fetchAndReplyBeds24Messages() {
       let roomInfo = null;
       if (propInfo && msg.roomId) roomInfo = propInfo.rooms.find(r => r.id === msg.roomId);
 
-      const systemPrompt = buildSystemPrompt(propInfo, roomInfo);
+      // Vérifier si réservation active pour ce logement
+      const activeBooking = await getActiveBooking(msg.roomId);
+      const systemPrompt = buildSystemPrompt(propInfo, roomInfo, !!activeBooking);
+
+      console.log('Réservation active:', !!activeBooking);
+
       const aiReply = await generateAIReply(messageText, systemPrompt);
       if (aiReply) await sendBeds24Reply(token, msg, aiReply);
     }
@@ -347,7 +404,8 @@ app.get('/status', async (req, res) => {
     digicode: propInfo?.digicode || 'non trouvé',
     logements: propInfo?.rooms?.length || 0,
     messagesTraités: processedMessages.size,
-    agentDémarréLe: AGENT_START_TIME.toISOString()
+    agentDémarréLe: AGENT_START_TIME.toISOString(),
+    heureActuelle: getDatetime()
   });
 });
 
@@ -381,7 +439,8 @@ app.post('/api/chat', async (req, res) => {
   try {
     const fetch = await getFetch();
     const propInfo = await getPropertyInfo();
-    const body = { ...req.body, system: buildSystemPrompt(propInfo, null) };
+    const activeBooking = await getActiveBooking(null);
+    const body = { ...req.body, system: buildSystemPrompt(propInfo, null, !!activeBooking) };
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
