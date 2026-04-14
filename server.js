@@ -182,8 +182,9 @@ async function getAllActiveBookings() {
     const dateFrom = new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString().split('T')[0];
     const dateTo = new Date(now.getTime() + 2 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
 
+    // departureFrom = hier pour capturer tous les séjours en cours
     const response = await fetch(
-      `https://beds24.com/api/v2/bookings?arrivalFrom=${dateFrom}&departureFrom=${dateFrom}&status=confirmed&maxResults=50`,
+      `https://beds24.com/api/v2/bookings?departureFrom=${dateFrom}&status=confirmed&maxResults=50`,
       { headers: { 'token': token } }
     );
     const raw = await response.json();
