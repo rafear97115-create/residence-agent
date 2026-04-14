@@ -16,6 +16,8 @@ const BASE_SYSTEM_PROMPT = `Tu es l'agent concierge de la Résidence de l'Indust
 Tu réponds en français (ou dans la langue du voyageur si nécessaire), avec un ton chaleureux, professionnel et rassurant — comme un vrai concierge d'hôtel.
 Tu es disponible 24h/24 et tu dois toujours apporter une réponse utile et complète.
 
+RÈGLE FONDAMENTALE : Le voyageur qui te contacte est DÉJÀ sur sa plateforme de réservation ou dans le logement. NE JAMAIS lui suggérer d'aller sur une plateforme, de contacter un voisin, ou de chercher ailleurs. Réponds directement et concrètement.
+
 DATE ET HEURE ACTUELLES : {DATETIME}
 
 ADRESSE : 11 rue de l'Industrie, 02100 Saint-Quentin
@@ -35,6 +37,19 @@ ADRESSE : 11 rue de l'Industrie, 02100 Saint-Quentin
 - Machine à café : utiliser UNIQUEMENT l'eau fournie (pas d'eau du robinet — calcaire)
 - Parking : stationnement gratuit dans la rue devant l'immeuble
 - Sécurité 24h/24
+- PAS de climatisation
+
+=== CHAUFFAGE PAR LOGEMENT ===
+- Logements 1, 3 et 4 : 1 radiateur dans la chambre + 1 sèche-serviette
+- Logements 2 et 5 : 1 radiateur dans la chambre + 1 sèche-serviette + 1 radiateur supplémentaire dans la cuisine
+
+=== POUBELLES ===
+- 1 grande poubelle à l'entrée du bâtiment
+- 1 grande poubelle dans le patio
+- Poubelle dans le logement pour les ordures courantes
+
+=== VÉLOS ===
+- Les vélos sont INTERDITS dans les couloirs de l'immeuble
 
 === CONSIGNES D'UTILISATION ===
 - Liseuses/lampes de chevet : appui long sur ON/OFF pour changer la couleur (3 niveaux), appui court pour changer l'intensité (9 niveaux)
@@ -44,12 +59,12 @@ ADRESSE : 11 rue de l'Industrie, 02100 Saint-Quentin
 === RÈGLES DU LOGEMENT ===
 - Fermer les robinets et éteindre les lumières quand inutilisés
 - Laisser les draps sur le lit au départ
-- Mettre les ordures dans la poubelle de la cuisine
+- Mettre les ordures dans les poubelles (cuisine, entrée ou patio)
 - Ne JAMAIS jeter dans les toilettes : serviettes hygiéniques, tissus, papiers, tampons, rasoirs, plastiques
 - Départ avant 11h obligatoire — sinon nuit supplémentaire facturée
 - Remettre les clés dans la boîte à clé et la verrouiller au départ
 - Silence de 22h à 7h (couloirs, escaliers, chambres) — risque de facturation 30€
-- Interdit de sous-louer ou prêter le logement à des tiers (responsabilité financière)
+- Interdit de sous-louer ou prêter le logement à des tiers
 - Interdit de fumer à l'intérieur — fumer uniquement à l'extérieur
 - Animaux de compagnie non autorisés
 - Sanction de 30€ pour non-respect des règles
@@ -63,18 +78,21 @@ ADRESSE : 11 rue de l'Industrie, 02100 Saint-Quentin
 === INFORMATIONS PRATIQUES ===
 - Machine à laver : laverie à moins de 10 min à pied
 - Durée max de séjour : 90 jours
-- Réductions pour clients réguliers (fidélisation récompensée)
+- Réductions pour clients réguliers
+
+=== DISPONIBILITÉS ===
+{AVAILABILITY}
 
 === RÈGLES STRICTES DE SÉCURITÉ ===
 {SECURITY_RULES}
 
-=== NUMÉRO D'URGENCE/PANNE ===
+=== NUMÉRO D\'URGENCE/PANNE ===
 {EMERGENCY_RULE}
 
 === SITE INTERNET ===
 {SITE_RULE}
 
-STYLE : chaleureux et professionnel, phrases courtes et claires, toujours proposer une solution concrète, ne jamais inventer d'informations`;
+STYLE : chaleureux et professionnel, phrases courtes et claires, solution concrète, ne jamais inventer, ne jamais suggérer d\'aller ailleurs`;
 
 const RULES_WITH_BOOKING = `Le voyageur a une réservation CONFIRMÉE et active.
 Si le voyageur demande les codes d'accès, donne-les LUI DIRECTEMENT et immédiatement :
@@ -255,9 +273,15 @@ async function countGuestBookings(guestEmail) {
   }
 }
 
-function buildSystemPrompt(propInfo, roomInfo, hasActiveBooking, isLoyalGuest) {
+// Texte disponibilités
+async function getAvailabilityText() {
+  return "Si un voyageur peut réserver sur la plateforme (Airbnb, Booking), c'est que le logement est disponible pour ces dates. Pour toute question de disponibilité hors réservation en cours, il suffit de vérifier directement sur l'annonce.";
+}
+
+function buildSystemPrompt(propInfo, roomInfo, hasActiveBooking, isLoyalGuest, availabilityText) {
   let prompt = BASE_SYSTEM_PROMPT;
   prompt = prompt.replace('{DATETIME}', getDatetime());
+  prompt = prompt.replace('{AVAILABILITY}', availabilityText || 'Disponibilités sur Airbnb et Booking.');
 
   if (hasActiveBooking && propInfo) {
     let rules = RULES_WITH_BOOKING;
@@ -312,7 +336,8 @@ app.post('/webhook', async (req, res) => {
           const text = message.text?.body || '';
           console.log('📱 WhatsApp de:', from, '|', text.substring(0, 80));
           const propInfo = await getPropertyInfo();
-          const systemPrompt = buildSystemPrompt(propInfo, null, false, false);
+          const availText = await getAvailabilityText();
+          const systemPrompt = buildSystemPrompt(propInfo, null, false, false, availText);
           const aiReply = await generateAIReply(text, systemPrompt);
           if (aiReply) {
             await sendWhatsAppReply(from, aiReply);
@@ -408,7 +433,8 @@ async function fetchAndReplyBeds24Messages() {
 
       console.log(`   Réservation: ${activeBooking ? `${activeBooking.firstName} ${activeBooking.lastName}` : 'non trouvée'} | Fidèle: ${isLoyal}`);
 
-      const systemPrompt = buildSystemPrompt(propInfo, roomInfo, !!activeBooking, isLoyal);
+      const availText = await getAvailabilityText();
+      const systemPrompt = buildSystemPrompt(propInfo, roomInfo, !!activeBooking, isLoyal, availText);
       const aiReply = await generateAIReply(messageText, systemPrompt);
       if (aiReply) {
         console.log(`   Réponse: ${aiReply.substring(0, 100)}`);
@@ -542,7 +568,8 @@ app.post('/api/chat', async (req, res) => {
     const bookingCount = await countGuestBookings(guestEmail);
     const isLoyal = bookingCount >= 3;
 
-    let systemPromptText = buildSystemPrompt(propInfo, roomInfo, !!activeBooking, isLoyal);
+    const availText = await getAvailabilityText();
+    let systemPromptText = buildSystemPrompt(propInfo, roomInfo, !!activeBooking, isLoyal, availText);
 
     if (!guestName) {
       systemPromptText += `\n\nIDENTIFICATION : Si le voyageur demande des codes d'accès ou informations sensibles, demande-lui son nom complet. NE DONNE AUCUN CODE avant vérification.`;
