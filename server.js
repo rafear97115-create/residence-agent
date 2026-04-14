@@ -92,7 +92,26 @@ ADRESSE : 11 rue de l'Industrie, 02100 Saint-Quentin
 === SITE INTERNET ===
 {SITE_RULE}
 
-STYLE : chaleureux et professionnel, phrases courtes et claires, solution concrète, ne jamais inventer, ne jamais suggérer d\'aller ailleurs`;
+STYLE : chaleureux et professionnel, phrases courtes et claires, solution concrète, ne jamais inventer, ne jamais suggérer d\'aller ailleurs
+
+=== COMPORTEMENT SUR PLATEFORME ===
+Tu te fais passer pour l\'hôte qui répond directement sur la plateforme de réservation.
+Tu adaptes tes réponses selon la plateforme détectée dans le contexte.
+
+LIENS AIRBNB PAR LOGEMENT :
+- Logement 1 (Agate) : https://airbnb.com/h/rdi-agate1
+- Logement 2 (Bégonia) : https://airbnb.com/h/rdi-begonia2
+- Logement 3 (Capucine) : https://airbnb.com/h/rdi-capucine3
+- Logement 4 (Dahlia) : https://airbnb.com/h/rdi-daliha4
+- Logement 5 (Églantine) : https://airbnb.com/h/rdi-eglantine5
+
+LIEN BOOKING (tous logements) : https://www.booking.com/Share-4ZhcuX6
+Pour les disponibilités Booking : cliquer sur "Voir les disponibilités" après avoir saisi les dates.
+
+Si le voyageur demande les disponibilités :
+- Sur Airbnb → donner les liens des logements disponibles ci-dessus
+- Sur Booking → donner le lien https://www.booking.com/Share-4ZhcuX6
+- Sinon → donner les deux options`;
 
 const RULES_WITH_BOOKING = `Le voyageur a une réservation CONFIRMÉE et active.
 Si le voyageur demande les codes d'accès, donne-les LUI DIRECTEMENT et immédiatement :
@@ -228,30 +247,68 @@ async function getBookingByRoomId(roomId) {
   return bookings.find(b => b.roomId === roomId) || null;
 }
 
-// Vérifier voyageur par nom (pour chat web)
+// Vérifier identité voyageur : 2 conditions sur 3 (nom, téléphone, email)
+function normalizePhone(phone) {
+  if (!phone) return '';
+  return phone.replace(/[^0-9]/g, '').replace(/^0/, '33').replace(/^\+/, '');
+}
+
+function nameMatch(provided, firstName, lastName) {
+  if (!provided) return false;
+  const p = provided.toLowerCase().replace(/[^a-zà-ü]/g, ' ').trim();
+  const fn = (firstName || '').toLowerCase();
+  const ln = (lastName || '').toLowerCase();
+  const parts = p.split(/\s+/).filter(x => x.length > 1);
+  // Chaque partie doit matcher firstName ou lastName
+  return parts.length > 0 && parts.every(part => fn.includes(part) || ln.includes(part));
+}
+
+async function verifyGuestIdentity(provided) {
+  // provided = { name, phone, email } — au moins 2 doivent matcher
+  const bookings = await getAllActiveBookings();
+  
+  for (const b of bookings) {
+    let score = 0;
+    const reasons = [];
+
+    // Condition 1 : Nom/prénom
+    if (provided.name && nameMatch(provided.name, b.firstName, b.lastName)) {
+      score++;
+      reasons.push('nom');
+    }
+
+    // Condition 2 : Téléphone
+    if (provided.phone) {
+      const pPhone = normalizePhone(provided.phone);
+      const bPhone = normalizePhone(b.phone || b.mobile || '');
+      if (pPhone.length >= 8 && bPhone.length >= 8 && (bPhone.includes(pPhone) || pPhone.includes(bPhone))) {
+        score++;
+        reasons.push('téléphone');
+      }
+    }
+
+    // Condition 3 : Email
+    if (provided.email && b.email) {
+      if (provided.email.toLowerCase().trim() === b.email.toLowerCase().trim()) {
+        score++;
+        reasons.push('email');
+      }
+    }
+
+    if (score >= 2) {
+      console.log(`✅ Voyageur vérifié: ${b.firstName} ${b.lastName} | Critères: ${reasons.join(', ')} | Logement: ${b.roomId}`);
+      return b;
+    }
+  }
+
+  console.log(`❌ Vérification échouée pour:`, provided);
+  return null;
+}
+
+// Ancienne fonction pour compatibilité
 async function verifyGuestByName(guestName) {
   if (!guestName || guestName.length < 2) return null;
-  try {
-    const bookings = await getAllActiveBookings();
-    const nameLower = guestName.toLowerCase().trim();
-    const nameParts = nameLower.split(/\s+/).filter(p => p.length > 1);
-
-    const match = bookings.find(b => {
-      const fn = (b.firstName || '').toLowerCase();
-      const ln = (b.lastName || '').toLowerCase();
-      return nameParts.some(part => fn.includes(part) || ln.includes(part));
-    });
-
-    if (match) {
-      console.log(`✅ Voyageur vérifié: ${match.firstName} ${match.lastName} | Logement: ${match.roomId}`);
-    } else {
-      console.log(`❌ Aucune réservation pour: ${guestName}`);
-    }
-    return match || null;
-  } catch (err) {
-    console.error('Erreur verifyGuestByName:', err.message);
-    return null;
-  }
+  return verifyGuestIdentity({ name: guestName });
 }
 
 // Compter réservations passées par email
@@ -554,11 +611,13 @@ app.post('/api/chat', async (req, res) => {
     const propInfo = await getPropertyInfo();
 
     const guestName = req.body.guestName || null;
+    const guestPhone = req.body.guestPhone || null;
+    const guestEmail = req.body.guestEmail || null;
     let activeBooking = null;
     let roomInfo = null;
 
-    if (guestName) {
-      activeBooking = await verifyGuestByName(guestName);
+    if (guestName || guestPhone || guestEmail) {
+      activeBooking = await verifyGuestIdentity({ name: guestName, phone: guestPhone, email: guestEmail });
       if (activeBooking && propInfo) {
         roomInfo = propInfo.rooms.find(r => r.id === activeBooking.roomId);
       }
@@ -574,12 +633,15 @@ app.post('/api/chat', async (req, res) => {
     if (!guestName) {
       systemPromptText += `\n\nIDENTIFICATION : Si le voyageur demande des codes d'accès ou informations sensibles, demande-lui son nom complet. NE DONNE AUCUN CODE avant vérification.`;
     } else if (!activeBooking) {
-      systemPromptText += `\n\nVÉRIFICATION ÉCHOUÉE pour "${guestName}". Aucune réservation active trouvée. NE PAS donner les codes. Dire : "Je ne trouve pas de réservation à ce nom. Vérifiez l'orthographe ou consultez votre confirmation sur la plateforme de réservation."`;
+      const provided = [guestName, guestPhone, guestEmail].filter(Boolean).join(', ');
+      systemPromptText += `\n\nVÉRIFICATION ÉCHOUÉE pour: ${provided}. Aucune réservation active trouvée avec ces informations. NE PAS donner les codes. Demander poliment de vérifier les informations fournies ou de fournir un autre critère (nom complet, email ou numéro de téléphone).`;
     }
 
     const body = { ...req.body, system: systemPromptText };
     delete body.guestName;
     delete body.guestDate;
+    delete body.guestPhone;
+    delete body.guestEmail;
 
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
