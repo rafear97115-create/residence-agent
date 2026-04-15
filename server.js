@@ -623,8 +623,8 @@ app.post('/api/chat', async (req, res) => {
       }
     }
 
-    const guestEmail = activeBooking?.email || null;
-    const bookingCount = await countGuestBookings(guestEmail);
+    const bookingEmail = activeBooking?.email || null;
+    const bookingCount = await countGuestBookings(bookingEmail);
     const isLoyal = bookingCount >= 3;
 
     const availText = await getAvailabilityText();
