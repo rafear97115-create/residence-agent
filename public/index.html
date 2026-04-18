@@ -26,8 +26,7 @@
   .system-msg { text-align: center; font-size: 11px; color: var(--muted); padding: 6px 16px; background: var(--surface); border-radius: 20px; align-self: center; border: 1px solid var(--border); }
   .msg { display: flex; gap: 10px; align-items: flex-end; animation: fadeUp 0.3s ease forwards; opacity: 0; }
   @keyframes fadeUp { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
-  .msg.agent { flex-direction: row; }
-  .msg.user { flex-direction: row-reverse; }
+  .msg.agent { flex-direction: row; } .msg.user { flex-direction: row-reverse; }
   .avatar { width: 32px; height: 32px; border-radius: 10px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; font-size: 15px; }
   .avatar.agent-av { background: linear-gradient(135deg, #c8a96e33, #c8a96e22); border: 1px solid #c8a96e44; }
   .avatar.user-av { background: var(--surface2); border: 1px solid var(--border); }
@@ -37,8 +36,7 @@
   .bubble .timestamp { display: block; font-size: 10px; color: var(--muted); margin-top: 6px; text-align: right; }
   .typing-dots { background: var(--agent-bubble); border: 1px solid #2a2a3a; border-radius: 16px; border-bottom-left-radius: 4px; padding: 14px 18px; display: flex; gap: 5px; align-items: center; }
   .typing-dots span { width: 6px; height: 6px; background: var(--muted); border-radius: 50%; animation: bounce 1.2s infinite; }
-  .typing-dots span:nth-child(2) { animation-delay: 0.2s; }
-  .typing-dots span:nth-child(3) { animation-delay: 0.4s; }
+  .typing-dots span:nth-child(2) { animation-delay: 0.2s; } .typing-dots span:nth-child(3) { animation-delay: 0.4s; }
   @keyframes bounce { 0%, 60%, 100% { transform: translateY(0); } 30% { transform: translateY(-6px); } }
   .quick-replies { display: flex; flex-wrap: wrap; gap: 8px; padding: 4px 0 8px 42px; }
   .qr-btn { background: var(--surface2); border: 1px solid var(--border); border-radius: 20px; padding: 7px 14px; font-size: 12px; color: var(--accent); cursor: pointer; transition: all 0.2s; font-family: 'DM Sans', sans-serif; }
@@ -46,23 +44,19 @@
   .input-area { position: sticky; bottom: 0; background: var(--bg); padding: 16px 0 24px; border-top: 1px solid var(--border); }
   .input-row { display: flex; gap: 10px; align-items: flex-end; }
   textarea { flex: 1; background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 12px 16px; color: var(--text); font-family: 'DM Sans', sans-serif; font-size: 14px; resize: none; min-height: 48px; max-height: 140px; line-height: 1.5; transition: border-color 0.2s; outline: none; }
-  textarea:focus { border-color: var(--accent); }
-  textarea::placeholder { color: var(--muted); }
+  textarea:focus { border-color: var(--accent); } textarea::placeholder { color: var(--muted); }
   .send-btn { width: 48px; height: 48px; border-radius: 14px; background: var(--accent); border: none; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: all 0.2s; flex-shrink: 0; }
   .send-btn:hover { background: var(--accent2); transform: scale(1.05); }
   .send-btn svg { width: 20px; height: 20px; fill: var(--bg); }
   .info-cards { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 4px 0 16px 42px; }
   .info-card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; font-size: 12px; }
   .info-card .ic-label { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: 0.07em; margin-bottom: 4px; }
-  .info-card .ic-value { color: var(--text); font-weight: 500; }
-  .info-card .ic-value.gold { color: var(--accent); }
+  .info-card .ic-value { color: var(--text); font-weight: 500; } .info-card .ic-value.gold { color: var(--accent); }
   .disclaimer { font-size: 11px; color: var(--muted); text-align: center; padding: 8px 0 0; }
-  ::-webkit-scrollbar { width: 4px; }
-  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+  ::-webkit-scrollbar { width: 4px; } ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
 </style>
 </head>
 <body>
-
 <header>
   <div class="header-icon">🏠</div>
   <div class="header-info">
@@ -71,7 +65,6 @@
   </div>
   <div class="header-badge">IA ACTIVE</div>
 </header>
-
 <div class="chat-wrapper">
   <div class="messages" id="messages">
     <div class="system-msg">Aujourd'hui · Agent IA opérationnel</div>
@@ -95,12 +88,11 @@
           <button class="qr-btn" onclick="sendQuick('Arrivée anticipée possible ?')">⏰ Arrivée anticipée</button>
           <button class="qr-btn" onclick="sendQuick('Que faire en cas de panne ?')">🔧 Panne / incident</button>
           <button class="qr-btn" onclick="sendQuick('Y a-t-il du parking ?')">🚗 Parking</button>
-          <button class="qr-btn" onclick="sendQuick('Quels équipements sont disponibles ?')">🛋️ Équipements</button>
+          <button class="qr-btn" onclick="sendQuick('Restaurants et visites à Saint-Quentin ?')">🍽️ Tourisme</button>
         </div>
       </div>
     </div>
   </div>
-
   <div class="input-area">
     <div class="input-row">
       <textarea id="userInput" placeholder="Posez votre question…" rows="1" onkeydown="handleKey(event)" oninput="autoResize(this)"></textarea>
@@ -113,106 +105,243 @@
 </div>
 
 <script>
+// ============================================================
+// PROFIL VOYAGEUR & MÉMOIRE
+// ============================================================
+let guestProfile = {
+  name: null, phone: null, email: null,
+  language: 'fr', messages: 0,
+  intentHistory: [], verified: false
+};
+
+// Mémoire persistante (visite précédente)
+try {
+  const mem = JSON.parse(localStorage.getItem('rdi_guest') || '{}');
+  if (mem.name) guestProfile.name = mem.name;
+} catch(e) {}
+
 let conversationHistory = [];
-let detectedGuestName = null;
-let detectedGuestPhone = null;
-let detectedGuestEmail = null;
-let guestVerified = false;
+let lastMessageTime = 0;
 
-function getTime() {
-  return new Date().toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
+// ============================================================
+// DÉTECTION LANGUE
+// ============================================================
+function detectLanguage(text) {
+  if (/[àâçéèêëîïôûùüÿñæœ]/i.test(text)) return 'fr';
+  if (/hello|hi|thanks|please|check.?in|wifi|checkout/i.test(text)) return 'en';
+  if (/hola|gracias|buenos|por favor/i.test(text)) return 'es';
+  if (/ciao|grazie|buongiorno/i.test(text)) return 'it';
+  return 'fr';
 }
 
-function autoResize(el) {
-  el.style.height = 'auto';
-  el.style.height = Math.min(el.scrollHeight, 140) + 'px';
+// ============================================================
+// DÉTECTION INTENTION
+// ============================================================
+function detectIntent(text) {
+  const t = text.toLowerCase();
+  if (/urgent|panne|chauffage|fuite|eau|électricité|clim|bruit|bloqu|cassé|marche pas/.test(t)) return 'incident';
+  if (/code|digicode|clé|ouvrir|accès|boite|porte/.test(t)) return 'access';
+  if (/parking|voiture|garer|stationn/.test(t)) return 'parking';
+  if (/wifi|internet|connexion|réseau/.test(t)) return 'wifi';
+  if (/arriv|check.?in|entrer/.test(t)) return 'arrival';
+  if (/départ|checkout|partir|check.?out/.test(t)) return 'checkout';
+  if (/restaurant|manger|dîner|déjeuner|food|eat/.test(t)) return 'restaurant';
+  if (/visiter|visite|tour|activit|voir|faire|balad/.test(t)) return 'tourism';
+  if (/disponib|libre|réserv|dates/.test(t)) return 'availability';
+  if (/avis|commentaire|note|review/.test(t)) return 'review';
+  return 'general';
 }
 
-function handleKey(e) {
-  if (e.key === 'Enter' && !e.shiftKey) {
-    e.preventDefault();
-    sendMessage();
-  }
-}
-
-function sendQuick(text) {
-  document.getElementById('userInput').value = text;
-  sendMessage();
-}
-
-function addMessage(role, content, delay = 0) {
-  const messages = document.getElementById('messages');
-  const time = getTime();
-  if (role === 'typing') {
-    const div = document.createElement('div');
-    div.className = 'msg agent';
-    div.id = 'typing-indicator';
-    div.innerHTML = '<div class="avatar agent-av">🏠</div><div class="typing-dots"><span></span><span></span><span></span></div>';
-    messages.appendChild(div);
-    messages.scrollTop = messages.scrollHeight;
-    return;
-  }
-  const existing = document.getElementById('typing-indicator');
-  if (existing) existing.remove();
-  const div = document.createElement('div');
-  div.className = 'msg ' + role;
-  const avatar = role === 'agent' ? '<div class="avatar agent-av">🏠</div>' : '<div class="avatar user-av">👤</div>';
-  div.innerHTML = (role === 'agent' ? avatar : '') +
-    '<div class="bubble">' + content.replace(/\n/g, '<br>') + '<span class="timestamp">' + time + '</span></div>' +
-    (role === 'user' ? avatar : '');
-  messages.appendChild(div);
-  messages.scrollTop = messages.scrollHeight;
-}
-
+// ============================================================
+// DÉTECTION NOM / TÉLÉPHONE / EMAIL
+// ============================================================
 function extractGuestInfo(text) {
   const emailMatch = text.match(/[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/);
-  if (emailMatch && !detectedGuestEmail) detectedGuestEmail = emailMatch[0];
+  if (emailMatch && !guestProfile.email) guestProfile.email = emailMatch[0];
+
   const phoneMatch = text.match(/(\+?33|0)[1-9][\s.\-]?(?:\d[\s.\-]?){7}\d/);
-  if (phoneMatch && !detectedGuestPhone) detectedGuestPhone = phoneMatch[0];
-  if (!detectedGuestName) {
+  if (phoneMatch && !guestProfile.phone) guestProfile.phone = phoneMatch[0];
+
+  if (!guestProfile.name) {
     const patterns = [
       /(?:je suis|je m.appelle|mon nom est)\s+(?:[Mm]r?\.?\s+|[Mm]me?\.?\s+)?([A-Za-zÀ-ü]+(?:\s+[A-Za-zÀ-ü]+)?)/i,
       /(?:[Mm]onsieur|[Mm]adame|[Mm]r\.?|[Mm]me\.?)\s+([A-Za-zÀ-ü]+(?:\s+[A-Za-zÀ-ü]+)?)/i,
     ];
     for (const p of patterns) {
       const m = text.match(p);
-      if (m && m[1] && m[1].length > 2) { detectedGuestName = m[1].trim(); break; }
+      if (m && m[1] && m[1].length > 2) { guestProfile.name = m[1].trim(); break; }
     }
   }
+
+  // Sauvegarde mémoire
+  try {
+    localStorage.setItem('rdi_guest', JSON.stringify({ name: guestProfile.name }));
+  } catch(e) {}
 }
 
+// ============================================================
+// RÉPONSES INSTANTANÉES LOCALES
+// ============================================================
+const INSTANT_RESPONSES = {
+  incident: {
+    fr: "Je suis sincèrement désolé pour ce problème 🙏\n\nContactez immédiatement notre service technique :\n\n📞 06 62 52 43 81\n\nIls interviendront dans les plus brefs délais.",
+    en: "I'm very sorry for this issue 🙏\n\nPlease contact our technical team immediately:\n\n📞 06 62 52 43 81\n\nThey will assist you as soon as possible."
+  },
+  parking: {
+    fr: "🚗 Le stationnement est gratuit dans la rue juste devant l'immeuble, au 11 rue de l'Industrie.\n\nPas de parking privé, mais la rue est généralement disponible.",
+    en: "🚗 Free parking is available on the street in front of the building at 11 rue de l'Industrie.\n\nNo private parking, but street parking is usually available."
+  },
+  restaurant: {
+    fr: "🍽️ Voici quelques adresses appréciées à Saint-Quentin :\n\n• Le Golden Pub\n• Villa d'Isle\n• Le Rouget Noir\n\nToutes situées à quelques minutes de la résidence. Bon appétit ! 😊",
+    en: "🍽️ Here are some recommended restaurants in Saint-Quentin:\n\n• Le Golden Pub\n• Villa d'Isle\n• Le Rouget Noir\n\nAll just a few minutes from the residence. Enjoy! 😊"
+  },
+  tourism: {
+    fr: "🏛️ Saint-Quentin est connue pour son architecture Art Déco exceptionnelle !\n\n• Basilique de Saint-Quentin\n• Place de l'Hôtel de Ville\n• Musée Antoine Lécuyer\n• Parc d'Isle\n\nLe centre-ville est à quelques minutes à pied. Bonne visite ! 🌟",
+    en: "🏛️ Saint-Quentin is known for its exceptional Art Deco architecture!\n\n• Basilique de Saint-Quentin\n• Place de l'Hôtel de Ville\n• Musée Antoine Lécuyer\n• Parc d'Isle\n\nThe city center is just a short walk away. Enjoy your visit! 🌟"
+  },
+  availability: {
+    fr: "📅 Pour voir les disponibilités :\n\n🔵 Sur Airbnb :\n• Agate : airbnb.com/h/rdi-agate1\n• Bégonia : airbnb.com/h/rdi-begonia2\n• Capucine : airbnb.com/h/rdi-capucine3\n• Dahlia : airbnb.com/h/rdi-daliha4\n• Églantine : airbnb.com/h/rdi-eglantine5\n\n🟡 Sur Booking :\nbooking.com/Share-4ZhcuX6\n(Saisissez vos dates puis cliquez sur \"Voir les disponibilités\")",
+    en: "📅 To check availability:\n\n🔵 On Airbnb:\n• Agate: airbnb.com/h/rdi-agate1\n• Bégonia: airbnb.com/h/rdi-begonia2\n• Capucine: airbnb.com/h/rdi-capucine3\n• Dahlia: airbnb.com/h/rdi-daliha4\n• Églantine: airbnb.com/h/rdi-eglantine5\n\n🟡 On Booking:\nbooking.com/Share-4ZhcuX6\n(Enter your dates and click \"Check availability\")"
+  }
+};
+
+// ============================================================
+// UI HELPERS
+// ============================================================
+function getTime() {
+  return new Date().toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
+}
+function autoResize(el) {
+  el.style.height = 'auto';
+  el.style.height = Math.min(el.scrollHeight, 140) + 'px';
+}
+function handleKey(e) {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+}
+function sendQuick(text) {
+  document.getElementById('userInput').value = text;
+  sendMessage();
+}
+function addMessage(role, content) {
+  const messages = document.getElementById('messages');
+  const time = getTime();
+  if (role === 'typing') {
+    const div = document.createElement('div');
+    div.className = 'msg agent'; div.id = 'typing-indicator';
+    div.innerHTML = '<div class="avatar agent-av">🏠</div><div class="typing-dots"><span></span><span></span><span></span></div>';
+    messages.appendChild(div); messages.scrollTop = messages.scrollHeight; return;
+  }
+  const existing = document.getElementById('typing-indicator');
+  if (existing) existing.remove();
+  const div = document.createElement('div');
+  div.className = 'msg ' + role;
+  const av = role === 'agent' ? '<div class="avatar agent-av">🏠</div>' : '<div class="avatar user-av">👤</div>';
+  div.innerHTML = (role === 'agent' ? av : '') +
+    '<div class="bubble">' + content.replace(/\n/g, '<br>') + '<span class="timestamp">' + time + '</span></div>' +
+    (role === 'user' ? av : '');
+  messages.appendChild(div); messages.scrollTop = messages.scrollHeight;
+}
+
+// ============================================================
+// SEND MESSAGE — COEUR DU CONCIERGE
+// ============================================================
 async function sendMessage() {
+  // Anti-spam
+  const now = Date.now();
+  if (now - lastMessageTime < 800) return;
+  lastMessageTime = now;
+
   const input = document.getElementById('userInput');
   const text = input.value.trim();
   if (!text) return;
-  input.value = '';
-  input.style.height = 'auto';
+  input.value = ''; input.style.height = 'auto';
+
   addMessage('user', text);
   conversationHistory.push({ role: 'user', content: text });
-  addMessage('typing');
+
+  // Mises à jour profil
+  guestProfile.messages++;
+  guestProfile.language = detectLanguage(text);
   extractGuestInfo(text);
+  const intent = detectIntent(text);
+  guestProfile.intentHistory.push(intent);
+
+  const lang = guestProfile.language;
+
+  // ---- RÉPONSES INSTANTANÉES LOCALES ----
+  if (INSTANT_RESPONSES[intent]) {
+    const resp = INSTANT_RESPONSES[intent][lang] || INSTANT_RESPONSES[intent]['fr'];
+    addMessage('agent', resp);
+    conversationHistory.push({ role: 'assistant', content: resp });
+
+    // Message fidélisation après 3 échanges
+    if (guestProfile.messages === 3) {
+      setTimeout(() => {
+        const msg = lang === 'en'
+          ? "If your stay is going well, we would really appreciate your review after checkout 🙏"
+          : "Si votre séjour se passe bien, votre avis après le départ serait très apprécié 🙏";
+        addMessage('agent', msg);
+      }, 1500);
+    }
+    return;
+  }
+
+  // ---- APPEL IA ----
+  addMessage('typing');
+
   try {
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(), 15000);
+
     const payload = {
       model: 'claude-sonnet-4-20250514',
       max_tokens: 1000,
-      messages: conversationHistory
+      messages: conversationHistory,
+      guest: guestProfile
     };
-    if (detectedGuestName) payload.guestName = detectedGuestName;
-    if (detectedGuestPhone) payload.guestPhone = detectedGuestPhone;
-    if (detectedGuestEmail) payload.guestEmail = detectedGuestEmail;
+
+    if (guestProfile.name) payload.guestName = guestProfile.name;
+    if (guestProfile.phone) payload.guestPhone = guestProfile.phone;
+    if (guestProfile.email) payload.guestEmail = guestProfile.email;
 
     const response = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
+      body: JSON.stringify(payload),
+      signal: controller.signal
     });
+
     const data = await response.json();
-    if (data.guestVerified && !guestVerified) guestVerified = true;
+    if (data.guestVerified) guestProfile.verified = true;
+
     const reply = data.content?.[0]?.text || "Je suis désolé, je n'ai pas pu traiter votre demande.";
     conversationHistory.push({ role: 'assistant', content: reply });
     addMessage('agent', reply);
+
+    // Message fidélisation après 3 échanges
+    if (guestProfile.messages === 3) {
+      setTimeout(() => {
+        const msg = lang === 'en'
+          ? "If your stay is going well, we would really appreciate your review after checkout 🙏"
+          : "Si votre séjour se passe bien, votre avis après le départ serait très apprécié 🙏";
+        addMessage('agent', msg);
+      }, 2000);
+    }
+
+    // Message confiance après 8 échanges
+    if (guestProfile.messages === 8) {
+      setTimeout(() => {
+        const msg = lang === 'en'
+          ? "Thank you for your trust 😊 Don't hesitate if you need any recommendations during your stay."
+          : "Merci pour votre confiance 😊 N'hésitez pas si vous avez besoin d'une recommandation pendant votre séjour.";
+        addMessage('agent', msg);
+      }, 2000);
+    }
+
   } catch (err) {
-    addMessage('agent', "Je rencontre un problème technique momentané.");
+    const existing = document.getElementById('typing-indicator');
+    if (existing) existing.remove();
+    addMessage('agent', "Je rencontre un problème technique momentané. Pour toute urgence : 📞 06 62 52 43 81");
   }
 }
 </script>
