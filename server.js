@@ -637,10 +637,13 @@ app.post('/api/chat', async (req, res) => {
       systemPromptText += `\n\nVÉRIFICATION ÉCHOUÉE pour: ${provided}. Aucune réservation active trouvée avec ces informations. NE PAS donner les codes. Demander poliment de vérifier les informations fournies ou de fournir un autre critère (nom complet, email ou numéro de téléphone).`;
     }
 
-    const body = { ...req.body, system: systemPromptText };
-    delete body.guestName;
-    delete body.guestDate;
-    delete body.guestPhone;
+    // Payload propre pour Anthropic
+    const body = {
+      model: req.body.model || 'claude-sonnet-4-20250514',
+      max_tokens: req.body.max_tokens || 1000,
+      system: systemPromptText,
+      messages: req.body.messages || []
+    };
     delete body.guestEmail;
 
     const response = await fetch('https://api.anthropic.com/v1/messages', {
