@@ -266,7 +266,8 @@ function nameMatch(provided, firstName, lastName) {
 async function verifyGuestIdentity(provided) {
   // provided = { name, phone, email } — au moins 2 doivent matcher
   const bookings = await getAllActiveBookings();
-  
+  const providedCount = [provided.name, provided.phone, provided.email].filter(Boolean).length;
+
   for (const b of bookings) {
     let score = 0;
     const reasons = [];
@@ -295,7 +296,9 @@ async function verifyGuestIdentity(provided) {
       }
     }
 
-    if (score >= 2) {
+    // Si 1 seul critère fourni → 1 suffit / Si 2+ critères fournis → 2 requis
+    const required = providedCount >= 2 ? 2 : 1;
+    if (score >= required) {
       console.log(`✅ Voyageur vérifié: ${b.firstName} ${b.lastName} | Critères: ${reasons.join(', ')} | Logement: ${b.roomId}`);
       return b;
     }
