@@ -161,7 +161,7 @@ async function getBeds24Token() {
   const fetch = await getFetch();
   const now = Date.now();
   if (beds24Token && now < tokenExpiry - 300000) return beds24Token;
-  const refreshToken = (beds24RefreshOverride || process.env.BEDS24_REFRESH_TOKEN || '').trim();
+  const refreshToken = (beds24RefreshOverride || process.env.BEDS24_REFRESH_TOKEN || '').replace(/["',\s{}]/g, '');
   if (!refreshToken) return null;
   try {
     // Délai maximum de 10 s pour ne pas bloquer le serveur si Beds24 ne répond pas
@@ -670,7 +670,8 @@ app.get('/debug-beds24', async (req, res) => {
       code_invitation_longueur: (process.env.BEDS24_TOKEN || '').length,
       refreshToken_en_memoire: !!beds24RefreshOverride
     };
-    const used = (beds24RefreshOverride || raw).trim();
+    const used = (beds24RefreshOverride || raw).replace(/["',\s{}]/g, '');
+    info.refreshToken_longueur_apres_nettoyage = used.length;
     if (used) {
       const r = await fetch('https://beds24.com/api/v2/authentication/token', { headers: { 'refreshToken': used } });
       const d = await r.json();
