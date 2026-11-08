@@ -140,6 +140,8 @@ const SITE_RULE_LOYAL = `Ce voyageur a effectué 3 réservations ou plus. En FIN
 
 const SITE_RULE_DEFAULT = `NE PAS mentionner le site internet www.locations-residence-industrie.fr`;
 
+const SITE_RULE_WHATSAPP = `Le voyageur te contacte par WhatsApp : il n'est pas sur une plateforme de réservation. Quand il souhaite réserver ou demande les disponibilités, propose-lui TROIS façons de réserver, en citant le site internet en premier : (1) en direct sur https://www.locations-residence-industrie.fr , (2) via Airbnb, (3) via Booking (liens indiqués plus haut). Ne mentionne le site que lorsque la réservation ou la disponibilité est le sujet de la conversation. Ne promets aucune réduction ni tarif particulier.`;
+
 function getDatetime() {
   return new Date().toLocaleString('fr-FR', {
     timeZone: 'Europe/Paris',
@@ -350,7 +352,7 @@ async function countGuestBookings(guestEmail) {
 }
 
 // Texte disponibilités
-const AVAILABILITY_DEFAULT = "Tu ne connais pas les disponibilités exactes. Ne confirme JAMAIS qu'un logement est libre sans vérification. Si le voyageur n'a pas donné de dates précises, demande-lui la date d'arrivée et la date de départ. Il peut ensuite consulter les disponibilités et réserver via les liens Airbnb ou Booking.";
+const AVAILABILITY_DEFAULT = "Tu ne connais pas les disponibilités exactes. Ne confirme JAMAIS qu'un logement est libre sans vérification. Si le voyageur n'a pas donné de dates précises, demande-lui la date d'arrivée et la date de départ. Il peut ensuite consulter les disponibilités et réserver en suivant les consignes de réservation ci-dessus.";
 
 const AIRBNB_LINKS = [
   { mots: ['agate'], lien: 'https://airbnb.com/h/rdi-agate1' },
@@ -490,7 +492,7 @@ async function getAvailabilityText(userMessage) {
       ? `Logements LIBRES :\n- ${result.free.join('\n- ')}\n`
       : "Aucun logement libre sur ces dates.\n";
     if (result.occupied.length) text += `Logements OCCUPÉS : ${result.occupied.join(', ')}\n`;
-    text += "Présente ces informations au voyageur. S'il n'y a aucun logement libre, dis que ces dates sont complètes et propose d'autres dates. La réservation n'est confirmée qu'une fois effectuée sur la plateforme (Airbnb ou Booking) : invite-le à réserver via le lien du logement.";
+    text += "Présente ces informations au voyageur. S'il n'y a aucun logement libre, dis que ces dates sont complètes et propose d'autres dates. La réservation n'est confirmée qu'une fois effectuée en ligne : invite-le à réserver en suivant les consignes de réservation ci-dessus (site internet, Airbnb ou Booking selon le canal).";
     return text;
   } catch (err) {
     console.error('Erreur getAvailabilityText:', err.message);
@@ -498,7 +500,7 @@ async function getAvailabilityText(userMessage) {
   }
 }
 
-function buildSystemPrompt(propInfo, roomInfo, hasActiveBooking, isLoyalGuest, availabilityText) {
+function buildSystemPrompt(propInfo, roomInfo, hasActiveBooking, isLoyalGuest, availabilityText, channel = 'platform') {
   let prompt = BASE_SYSTEM_PROMPT;
   prompt = prompt.replace('{DATETIME}', getDatetime());
   prompt = prompt.replace('{AVAILABILITY}', availabilityText || 'Disponibilités sur Airbnb et Booking.');
@@ -514,7 +516,7 @@ function buildSystemPrompt(propInfo, roomInfo, hasActiveBooking, isLoyalGuest, a
     prompt = prompt.replace('{EMERGENCY_RULE}', EMERGENCY_WITHOUT_BOOKING);
   }
 
-  prompt = prompt.replace('{SITE_RULE}', isLoyalGuest ? SITE_RULE_LOYAL : SITE_RULE_DEFAULT);
+  prompt = prompt.replace('{SITE_RULE}', channel === 'whatsapp' ? SITE_RULE_WHATSAPP : (isLoyalGuest ? SITE_RULE_LOYAL : SITE_RULE_DEFAULT));
 
   if (roomInfo && hasActiveBooking) {
     prompt += `\n\n=== INFOS LOGEMENT DU VOYAGEUR ===
@@ -631,7 +633,7 @@ app.post('/webhook', async (req, res) => {
           // Les dates peuvent avoir été données dans un message précédent
           const contexteDates = [...history.filter(m => m.role === 'user').slice(-3).map(m => m.content), text].join('\n');
           const availText = await getAvailabilityText(contexteDates);
-          const systemPrompt = buildSystemPrompt(null, null, false, false, availText);
+          const systemPrompt = buildSystemPrompt(null, null, false, false, availText, 'whatsapp');
 
           console.log('➡️ Appel Claude...');
           const aiReply = await generateAIReply(text, systemPrompt, history);
