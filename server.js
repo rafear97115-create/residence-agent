@@ -392,7 +392,7 @@ async function extractStayDates(userMessage) {
       },
       body: JSON.stringify({
         model: 'claude-haiku-5-5',
-        max_tokens: 100,
+        max_tokens: 1500,
         system: `Nous sommes le ${today}. Extrais les dates de séjour du message. Réponds UNIQUEMENT par du JSON : {"arrival":"AAAA-MM-JJ","departure":"AAAA-MM-JJ"}, ou {"arrival":null,"departure":null} si le message ne donne pas clairement une date d'arrivée ET une date de départ. Si l'année n'est pas précisée, prends la prochaine date à venir. Si plusieurs dates sont mentionnées, retiens les plus récentes (celles qui sont à la fin du texte).`,
         messages: [{ role: 'user', content: userMessage }]
       })
@@ -405,7 +405,7 @@ async function extractStayDates(userMessage) {
     const textBlock = (data.content || []).find(b => b.type === 'text' && b.text);
     const match = textBlock ? textBlock.text.match(/\{[\s\S]*\}/) : null;
     if (!match) {
-      console.log('📅 Extraction dates : pas de JSON dans la réponse :', textBlock ? textBlock.text.substring(0, 120) : 'aucun texte');
+      console.log('📅 Extraction dates : pas de JSON dans la réponse :', textBlock ? textBlock.text.substring(0, 120) : 'aucun texte (stop_reason: ' + data.stop_reason + ', blocs: ' + (data.content || []).map(b => b.type).join(',') + ')');
       return null;
     }
     const parsed = JSON.parse(match[0]);
@@ -555,6 +555,21 @@ function addToHistory(phone, userText, assistantText) {
   conversations.set(phone, conv);
 }
 
+const AVAILABILITY_CACHE_MS = 30 * 60 * 1000; // 30 min
+
+function setCachedAvailability(phone, text) {
+  const conv = conversations.get(phone) || { messages: [], updated: Date.now() };
+  conv.availability = { text, at: Date.now() };
+  conversations.set(phone, conv);
+}
+
+function getCachedAvailability(phone) {
+  const conv = conversations.get(phone);
+  if (!conv || !conv.availability) return null;
+  if (Date.now() - conv.availability.at > AVAILABILITY_CACHE_MS) return null;
+  return conv.availability.text;
+}
+
 // Nettoyage des conversations expirées, toutes les heures
 setInterval(() => {
   const now = Date.now();
@@ -632,7 +647,16 @@ app.post('/webhook', async (req, res) => {
           const history = getHistory(from);
           // Les dates peuvent avoir été données dans un message précédent
           const contexteDates = [...history.filter(m => m.role === 'user').slice(-3).map(m => m.content), text].join('\n');
-          const availText = await getAvailabilityText(contexteDates);
+          let availText = await getAvailabilityText(contexteDates);
+          if (availText.startsWith('VÉRIFICATION EN TEMPS RÉEL')) {
+            setCachedAvailability(from, availText);
+          } else if (availText === AVAILABILITY_DEFAULT) {
+            const cached = getCachedAvailability(from);
+            if (cached) {
+              console.log('📅 Réutilisation de la dernière vérification de disponibilité');
+              availText = cached;
+            }
+          }
           const systemPrompt = buildSystemPrompt(null, null, false, false, availText, 'whatsapp');
 
           console.log('➡️ Appel Claude...');
