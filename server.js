@@ -155,12 +155,13 @@ async function getFetch() {
 
 let beds24Token = null;
 let tokenExpiry = 0;
+let beds24RefreshOverride = null; // refresh token obtenu via /setup-beds24 (valable jusqu'au redémarrage)
 
 async function getBeds24Token() {
   const fetch = await getFetch();
   const now = Date.now();
   if (beds24Token && now < tokenExpiry - 300000) return beds24Token;
-  const refreshToken = process.env.BEDS24_REFRESH_TOKEN;
+  const refreshToken = (beds24RefreshOverride || process.env.BEDS24_REFRESH_TOKEN || '').trim();
   if (!refreshToken) return null;
   try {
     // Délai maximum de 10 s pour ne pas bloquer le serveur si Beds24 ne répond pas
@@ -629,10 +630,50 @@ app.get('/test-templates', async (req, res) => {
 app.get('/setup-beds24', async (req, res) => {
   try {
     const fetch = await getFetch();
+    const code = (process.env.BEDS24_TOKEN || '').trim();
+    if (!code) return res.json({ error: "Variable BEDS24_TOKEN vide sur Render" });
     const response = await fetch('https://beds24.com/api/v2/authentication/setup', {
-      headers: { 'code': process.env.BEDS24_TOKEN }
+      headers: { 'code': code, 'deviceName': 'residence-agent' }
     });
-    res.json(await response.json());
+    const data = await response.json();
+    if (data.refreshToken) {
+      // Connexion immédiate (jusqu'au prochain redémarrage)
+      beds24RefreshOverride = data.refreshToken;
+      beds24Token = data.token || null;
+      tokenExpiry = data.token ? Date.now() + ((data.expiresIn || 86400) * 1000) : 0;
+      console.log('✅ Beds24 : refresh token reçu via /setup-beds24 (longueur', data.refreshToken.length, ')');
+      return res.json({
+        succes: true,
+        etape_suivante: "Copiez la valeur de A_COPIER_DANS_BEDS24_REFRESH_TOKEN dans la variable BEDS24_REFRESH_TOKEN sur Render, puis enregistrez.",
+        A_COPIER_DANS_BEDS24_REFRESH_TOKEN: data.refreshToken
+      });
+    }
+    console.error('Setup Beds24 échoué:', JSON.stringify(data).substring(0, 300));
+    res.json({ succes: false, reponse_beds24: data });
+  } catch (err) { res.json({ error: err.message }); }
+});
+
+// Diagnostic : n'affiche aucune valeur secrète, seulement des informations de forme
+app.get('/debug-beds24', async (req, res) => {
+  try {
+    const fetch = await getFetch();
+    const raw = process.env.BEDS24_REFRESH_TOKEN || '';
+    const info = {
+      refreshToken_longueur: raw.length,
+      refreshToken_espaces_ou_retours: raw !== raw.trim() || /\s/.test(raw),
+      refreshToken_guillemets: /["']/.test(raw),
+      code_invitation_longueur: (process.env.BEDS24_TOKEN || '').length,
+      refreshToken_en_memoire: !!beds24RefreshOverride
+    };
+    const used = (beds24RefreshOverride || raw).trim();
+    if (used) {
+      const r = await fetch('https://beds24.com/api/v2/authentication/token', { headers: { 'refreshToken': used } });
+      const d = await r.json();
+      info.test_beds24 = d.token ? 'OK : token reçu' : d;
+    } else {
+      info.test_beds24 = 'aucun refresh token disponible';
+    }
+    res.json(info);
   } catch (err) { res.json({ error: err.message }); }
 });
 
