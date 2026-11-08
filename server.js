@@ -100,6 +100,8 @@ ADRESSE : 11 rue de l'Industrie, 02100 Saint-Quentin
 
 STYLE : chaleureux et professionnel, phrases courtes et claires, solution concrète, ne jamais inventer, ne jamais suggérer d'aller ailleurs
 
+FORMAT : tu écris dans une messagerie (WhatsApp, Airbnb, Booking). N'utilise jamais de markdown : pas de ** ni de # ni de titres. Pour une liste, utilise des tirets simples (-). Réponses courtes : 5 à 8 lignes maximum, sauf si le voyageur demande des détails.
+
 === COMPORTEMENT SUR PLATEFORME ===
 Tu te fais passer pour l'hôte qui répond directement sur la plateforme de réservation.
 Tu adaptes tes réponses selon la plateforme détectée dans le contexte.
@@ -348,8 +350,130 @@ async function countGuestBookings(guestEmail) {
 }
 
 // Texte disponibilités
-async function getAvailabilityText() {
-  return "Si un voyageur peut réserver sur la plateforme (Airbnb, Booking), c'est que le logement est disponible pour ces dates. Pour toute question de disponibilité hors réservation en cours, il suffit de vérifier directement sur l'annonce.";
+const AVAILABILITY_DEFAULT = "Tu ne connais pas les disponibilités exactes. Ne confirme JAMAIS qu'un logement est libre sans vérification. Si le voyageur n'a pas donné de dates précises, demande-lui la date d'arrivée et la date de départ. Il peut ensuite consulter les disponibilités et réserver via les liens Airbnb ou Booking.";
+
+const AIRBNB_LINKS = [
+  { mots: ['agate'], lien: 'https://airbnb.com/h/rdi-agate1' },
+  { mots: ['begonia'], lien: 'https://airbnb.com/h/rdi-begonia2' },
+  { mots: ['capucine'], lien: 'https://airbnb.com/h/rdi-capucine3' },
+  { mots: ['dahlia'], lien: 'https://airbnb.com/h/rdi-daliha4' },
+  { mots: ['eglantine'], lien: 'https://airbnb.com/h/rdi-eglantine5' }
+];
+
+const DATE_HINT = /(r[eé]serv|dispo|libre|nuit|s[eé]jour|\b(du|au|le)\s+\d|\d{1,2}\s*[\/-]\s*\d{1,2}|janvier|f[eé]vrier|mars|avril|\bmai\b|juin|juillet|ao[uû]t|septembre|octobre|novembre|d[eé]cembre|january|february|march|april|june|july|august|september|october|november|december|available|availability|book)/i;
+
+function normalizeText(s) {
+  return (s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+}
+
+function addDays(dateStr, n) {
+  const d = new Date(dateStr + 'T00:00:00Z');
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+}
+
+// Demande à Claude Haiku d'extraire les dates de séjour du message (ou null)
+async function extractStayDates(userMessage) {
+  if (!userMessage || !DATE_HINT.test(userMessage)) return null;
+  try {
+    const fetch = await getFetch();
+    const today = new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Paris' }); // AAAA-MM-JJ
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': process.env.ANTHROPIC_KEY,
+        'anthropic-version': '2023-06-01'
+      },
+      body: JSON.stringify({
+        model: 'claude-haiku-5-5',
+        max_tokens: 100,
+        system: `Nous sommes le ${today}. Extrais les dates de séjour du message. Réponds UNIQUEMENT par du JSON : {"arrival":"AAAA-MM-JJ","departure":"AAAA-MM-JJ"}, ou {"arrival":null,"departure":null} si le message ne donne pas clairement une date d'arrivée ET une date de départ. Si l'année n'est pas précisée, prends la prochaine date à venir. Si plusieurs dates sont mentionnées, retiens les plus récentes (celles qui sont à la fin du texte).`,
+        messages: [{ role: 'user', content: userMessage }]
+      })
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      console.error('Erreur extraction dates:', response.status, JSON.stringify(data).substring(0, 200));
+      return null;
+    }
+    const textBlock = (data.content || []).find(b => b.type === 'text' && b.text);
+    const match = textBlock ? textBlock.text.match(/\{[\s\S]*\}/) : null;
+    if (!match) return null;
+    const parsed = JSON.parse(match[0]);
+    const isDate = v => typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v);
+    if (!isDate(parsed.arrival) || !isDate(parsed.departure)) return null;
+    if (parsed.arrival < today || parsed.departure <= parsed.arrival) return null;
+    const nights = (new Date(parsed.departure) - new Date(parsed.arrival)) / 86400000;
+    if (nights > 90) return null;
+    return { arrival: parsed.arrival, departure: parsed.departure, nights };
+  } catch (err) {
+    console.error('Erreur extractStayDates:', err.message);
+    return null;
+  }
+}
+
+// Logements libres / occupés pour des dates données, d'après les réservations Beds24
+async function checkAvailability(arrival, departure) {
+  const token = await getBeds24Token();
+  if (!token) return null;
+  const propInfo = await getPropertyInfo();
+  if (!propInfo || !propInfo.rooms || propInfo.rooms.length === 0) return null;
+
+  const fetch = await getFetch();
+  const lastNight = addDays(departure, -1);
+  const firstDeparture = addDays(arrival, 1);
+  const response = await fetch(
+    `https://beds24.com/api/v2/bookings?arrivalTo=${lastNight}&departureFrom=${firstDeparture}&maxResults=200`,
+    { headers: { 'token': token } }
+  );
+  if (!response.ok) {
+    console.error('Erreur disponibilités Beds24:', response.status);
+    return null;
+  }
+  const raw = await response.json();
+  const bookings = raw?.data || raw;
+  if (!Array.isArray(bookings)) return null;
+
+  const busy = new Set(
+    bookings
+      .filter(b => !['cancelled', 'inquiry'].includes((b.status || '').toLowerCase()))
+      .filter(b => b.arrival < departure && b.departure > arrival) // chevauchement réel
+      .map(b => String(b.roomId))
+  );
+  console.log(`📅 Disponibilités ${arrival} → ${departure} | réservations en conflit: ${busy.size}`);
+
+  const free = [];
+  const occupied = [];
+  for (const room of propInfo.rooms) {
+    const name = room.name || `Logement ${room.id}`;
+    const norm = normalizeText(name);
+    const link = AIRBNB_LINKS.find(l => l.mots.some(m => norm.includes(m)));
+    const label = link ? `${name} (Airbnb : ${link.lien})` : name;
+    (busy.has(String(room.id)) ? occupied : free).push(label);
+  }
+  return { free, occupied };
+}
+
+async function getAvailabilityText(userMessage) {
+  try {
+    const dates = await extractStayDates(userMessage);
+    if (!dates) return AVAILABILITY_DEFAULT;
+    const result = await checkAvailability(dates.arrival, dates.departure);
+    if (!result) {
+      return AVAILABILITY_DEFAULT + "\nLa vérification automatique est momentanément indisponible : ne garantis pas la disponibilité pour ces dates, invite le voyageur à consulter les liens de réservation.";
+    }
+    let text = `VÉRIFICATION EN TEMPS RÉEL pour un séjour du ${dates.arrival} au ${dates.departure} (${dates.nights} nuit(s)) :\n`;
+    text += result.free.length
+      ? `Logements LIBRES :\n- ${result.free.join('\n- ')}\n`
+      : "Aucun logement libre sur ces dates.\n";
+    if (result.occupied.length) text += `Logements OCCUPÉS : ${result.occupied.join(', ')}\n`;
+    text += "Présente ces informations au voyageur. S'il n'y a aucun logement libre, dis que ces dates sont complètes et propose d'autres dates. La réservation n'est confirmée qu'une fois effectuée sur la plateforme (Airbnb ou Booking) : invite-le à réserver via le lien du logement.";
+    return text;
+  } catch (err) {
+    console.error('Erreur getAvailabilityText:', err.message);
+    return AVAILABILITY_DEFAULT;
+  }
 }
 
 function buildSystemPrompt(propInfo, roomInfo, hasActiveBooking, isLoyalGuest, availabilityText) {
@@ -381,9 +505,43 @@ function buildSystemPrompt(propInfo, roomInfo, hasActiveBooking, isLoyalGuest, a
   return prompt;
 }
 
+// ==================== MÉMOIRE DES CONVERSATIONS (WhatsApp) ====================
+
+const MEMORY_MAX_MESSAGES = 10;             // 5 échanges (question + réponse)
+const MEMORY_TTL_MS = 24 * 60 * 60 * 1000;  // 24 h, comme la fenêtre WhatsApp
+const conversations = new Map();            // numéro -> { messages: [...], updated: timestamp }
+
+function getHistory(phone) {
+  const conv = conversations.get(phone);
+  if (!conv || Date.now() - conv.updated > MEMORY_TTL_MS) {
+    conversations.delete(phone);
+    return [];
+  }
+  return conv.messages.slice();
+}
+
+function addToHistory(phone, userText, assistantText) {
+  const conv = conversations.get(phone) || { messages: [], updated: 0 };
+  conv.messages.push({ role: 'user', content: String(userText).substring(0, 1500) });
+  conv.messages.push({ role: 'assistant', content: String(assistantText).substring(0, 1500) });
+  while (conv.messages.length > MEMORY_MAX_MESSAGES) conv.messages.shift();
+  // L'historique doit toujours commencer par un message du voyageur
+  while (conv.messages.length && conv.messages[0].role !== 'user') conv.messages.shift();
+  conv.updated = Date.now();
+  conversations.set(phone, conv);
+}
+
+// Nettoyage des conversations expirées, toutes les heures
+setInterval(() => {
+  const now = Date.now();
+  for (const [phone, conv] of conversations) {
+    if (now - conv.updated > MEMORY_TTL_MS) conversations.delete(phone);
+  }
+}, 60 * 60 * 1000);
+
 // ==================== CLAUDE ====================
 
-async function generateAIReply(userMessage, systemPrompt) {
+async function generateAIReply(userMessage, systemPrompt, history = []) {
   try {
     const fetch = await getFetch();
     const response = await fetch('https://api.anthropic.com/v1/messages', {
@@ -397,7 +555,7 @@ async function generateAIReply(userMessage, systemPrompt) {
         model: CLAUDE_MODEL,
         max_tokens: 1000,
         system: systemPrompt,
-        messages: [{ role: 'user', content: userMessage }]
+        messages: [...history, { role: 'user', content: userMessage }]
       })
     });
     const data = await response.json();
@@ -447,14 +605,18 @@ app.post('/webhook', async (req, res) => {
           console.log('📱 WhatsApp de:', from, '|', text.substring(0, 80));
 
           // Pas d'appel à Beds24 ici : aucune réservation n'est vérifiée sur WhatsApp
-          const availText = await getAvailabilityText();
+          const history = getHistory(from);
+          // Les dates peuvent avoir été données dans un message précédent
+          const contexteDates = [...history.filter(m => m.role === 'user').slice(-3).map(m => m.content), text].join('\n');
+          const availText = await getAvailabilityText(contexteDates);
           const systemPrompt = buildSystemPrompt(null, null, false, false, availText);
 
           console.log('➡️ Appel Claude...');
-          const aiReply = await generateAIReply(text, systemPrompt);
+          const aiReply = await generateAIReply(text, systemPrompt, history);
           console.log('⬅️ Réponse Claude:', aiReply ? aiReply.substring(0, 60) : 'AUCUNE');
 
           if (aiReply) {
+            addToHistory(from, text, aiReply);
             await sendWhatsAppReply(from, aiReply);
             await notifyOwner(from, text, aiReply);
           }
@@ -495,7 +657,7 @@ async function notifyOwner(from, question, reply) {
     if (ownerNumber.length === 10 && ownerNumber.startsWith('0')) ownerNumber = '33' + ownerNumber.slice(1);
     if (!ownerNumber) return;
     if (ownerNumber === String(from)) return; // inutile de se notifier soi-même
-    const msg = `📱 WhatsApp\nDe: +${from}\nQuestion: ${question.substring(0, 100)}\nRéponse: ${reply.substring(0, 150)}`;
+    const msg = `📱 WhatsApp\nDe: +${from}\nQuestion: ${question}\nRéponse: ${reply}`.substring(0, 4000);
     await sendWhatsAppReply(ownerNumber, msg);
   } catch (err) {}
 }
@@ -557,7 +719,7 @@ async function fetchAndReplyBeds24Messages() {
 
       console.log(`   Réservation: ${activeBooking ? `${activeBooking.firstName} ${activeBooking.lastName}` : 'non trouvée'} | Fidèle: ${isLoyal}`);
 
-      const availText = await getAvailabilityText();
+      const availText = await getAvailabilityText(messageText);
       const systemPrompt = buildSystemPrompt(propInfo, roomInfo, !!activeBooking, isLoyal, availText);
       const aiReply = await generateAIReply(messageText, systemPrompt);
       if (aiReply) {
@@ -710,7 +872,8 @@ app.post('/api/chat', async (req, res) => {
     const bookingCount = await countGuestBookings(bookingEmail);
     const isLoyal = bookingCount >= 3;
 
-    const availText = await getAvailabilityText();
+    const lastUser = [...(req.body.messages || [])].reverse().find(m => m.role === 'user');
+    const availText = await getAvailabilityText(typeof lastUser?.content === 'string' ? lastUser.content : '');
     let systemPromptText = buildSystemPrompt(propInfo, roomInfo, !!activeBooking, isLoyal, availText);
 
     // Règle de sécurité absolue selon statut vérification
