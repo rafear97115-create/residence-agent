@@ -394,7 +394,7 @@ async function generateAIReply(userMessage, systemPrompt) {
       },
       body: JSON.stringify({
         model: CLAUDE_MODEL,
-        max_tokens: 600,
+        max_tokens: 1000,
         system: systemPrompt,
         messages: [{ role: 'user', content: userMessage }]
       })
@@ -404,7 +404,12 @@ async function generateAIReply(userMessage, systemPrompt) {
       console.error('Erreur Anthropic:', response.status, JSON.stringify(data));
       return null;
     }
-    return data.content?.[0]?.text || null;
+    const textBlock = (data.content || []).find(b => b.type === 'text' && b.text);
+    if (!textBlock) {
+      console.error('Réponse Claude sans texte:', JSON.stringify(data).substring(0, 500));
+      return null;
+    }
+    return textBlock.text;
   } catch (err) {
     console.error('Erreur IA:', err.message);
     return null;
