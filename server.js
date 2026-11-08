@@ -374,7 +374,10 @@ function addDays(dateStr, n) {
 
 // Demande à Claude Haiku d'extraire les dates de séjour du message (ou null)
 async function extractStayDates(userMessage) {
-  if (!userMessage || !DATE_HINT.test(userMessage)) return null;
+  if (!userMessage || !DATE_HINT.test(userMessage)) {
+    console.log('📅 Pas de mot-clé de date dans le message : vérification ignorée');
+    return null;
+  }
   try {
     const fetch = await getFetch();
     const today = new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Paris' }); // AAAA-MM-JJ
@@ -399,13 +402,26 @@ async function extractStayDates(userMessage) {
     }
     const textBlock = (data.content || []).find(b => b.type === 'text' && b.text);
     const match = textBlock ? textBlock.text.match(/\{[\s\S]*\}/) : null;
-    if (!match) return null;
+    if (!match) {
+      console.log('📅 Extraction dates : pas de JSON dans la réponse :', textBlock ? textBlock.text.substring(0, 120) : 'aucun texte');
+      return null;
+    }
     const parsed = JSON.parse(match[0]);
     const isDate = v => typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v);
-    if (!isDate(parsed.arrival) || !isDate(parsed.departure)) return null;
-    if (parsed.arrival < today || parsed.departure <= parsed.arrival) return null;
+    if (!isDate(parsed.arrival) || !isDate(parsed.departure)) {
+      console.log('📅 Extraction dates : aucune date claire ->', JSON.stringify(parsed));
+      return null;
+    }
+    if (parsed.arrival < today || parsed.departure <= parsed.arrival) {
+      console.log('📅 Extraction dates : dates rejetées (passées ou incohérentes) ->', JSON.stringify(parsed), '| aujourd\'hui =', today);
+      return null;
+    }
     const nights = (new Date(parsed.departure) - new Date(parsed.arrival)) / 86400000;
-    if (nights > 90) return null;
+    if (nights > 90) {
+      console.log('📅 Extraction dates : séjour de plus de 90 nuits, ignoré');
+      return null;
+    }
+    console.log('📅 Dates extraites :', parsed.arrival, '->', parsed.departure, '(' + nights + ' nuits)');
     return { arrival: parsed.arrival, departure: parsed.departure, nights };
   } catch (err) {
     console.error('Erreur extractStayDates:', err.message);
@@ -418,7 +434,10 @@ async function checkAvailability(arrival, departure) {
   const token = await getBeds24Token();
   if (!token) return null;
   const propInfo = await getPropertyInfo();
-  if (!propInfo || !propInfo.rooms || propInfo.rooms.length === 0) return null;
+  if (!propInfo || !propInfo.rooms || propInfo.rooms.length === 0) {
+    console.log('📅 Vérification impossible : logements Beds24 non chargés');
+    return null;
+  }
 
   const fetch = await getFetch();
   const lastNight = addDays(departure, -1);
@@ -433,7 +452,10 @@ async function checkAvailability(arrival, departure) {
   }
   const raw = await response.json();
   const bookings = raw?.data || raw;
-  if (!Array.isArray(bookings)) return null;
+  if (!Array.isArray(bookings)) {
+    console.log('📅 Réponse Beds24 inattendue :', JSON.stringify(raw).substring(0, 200));
+    return null;
+  }
 
   const busy = new Set(
     bookings
