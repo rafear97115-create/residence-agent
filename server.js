@@ -477,7 +477,8 @@ async function sendWhatsAppReply(to, message) {
       body: JSON.stringify({ messaging_product: 'whatsapp', to, type: 'text', text: { body: message } })
     });
     if (!response.ok) {
-      console.error('Erreur WhatsApp:', response.status, await response.text());
+      console.error('Erreur WhatsApp:', response.status, await response.text(),
+        '| destinataire: longueur', String(to).length, 'fin ...' + String(to).slice(-3));
     } else {
       console.log('✅ WhatsApp envoyé à:', to);
     }
@@ -488,8 +489,12 @@ async function sendWhatsAppReply(to, message) {
 
 async function notifyOwner(from, question, reply) {
   try {
-    const ownerNumber = process.env.OWNER_PHONE;
+    // Nettoyage : chiffres uniquement, 0 initial remplacé par l'indicatif 33
+    let ownerNumber = (process.env.OWNER_PHONE || '').replace(/\D/g, '');
+    if (ownerNumber.startsWith('00')) ownerNumber = ownerNumber.slice(2);
+    if (ownerNumber.length === 10 && ownerNumber.startsWith('0')) ownerNumber = '33' + ownerNumber.slice(1);
     if (!ownerNumber) return;
+    if (ownerNumber === String(from)) return; // inutile de se notifier soi-même
     const msg = `📱 WhatsApp\nDe: +${from}\nQuestion: ${question.substring(0, 100)}\nRéponse: ${reply.substring(0, 150)}`;
     await sendWhatsAppReply(ownerNumber, msg);
   } catch (err) {}
