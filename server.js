@@ -11,10 +11,17 @@
  * - NOTIFY_ALL=true (optionnel) renvoie AUSSI les échanges ordinaires au propriétaire
  * - PAUSE_HOURS (optionnel, défaut 12) durée de la pause du bot
  * - CORS_ORIGIN (optionnel) liste d'origines autorisées pour /api/chat, séparées par des virgules
+ * - STAY_VERIFICATION=off (optionnel) désactive la vérification "nom + dates + logement" sur WhatsApp
+ * (par défaut : un voyageur est vérifié s'il donne son nom ET les dates exactes de son séjour ET son logement)
  *
  * COMMANDES PROPRIÉTAIRE (à envoyer au numéro du bot depuis OWNER_PHONE)
  * /pause [numéro|bIDRÉSERVATION] [heures] /reprise [numéro|bIDRÉSERVATION] /statut /aide
- * (bIDRÉSERVATION = réservation Airbnb/Booking via Beds24, ex. /pause b95878640)
+ * /valider bIDRÉSERVATION [numéro] : confirme à la main l'identité d'un voyageur WhatsApp
+ * (le bot lui envoie alors directement ses informations d'accès)
+ * (bIDRÉSERVATION = réservation Beds24, ex. /pause b95878640)
+ *
+ * NOTE WhatsApp : les alertes au propriétaire sont des messages libres. Elles ne partent que si le propriétaire
+ * a écrit au numéro du bot dans les dernières 24 h (règle de Meta). Écrivez-lui "ok" ou "/statut" chaque jour.
  */
 
 const express = require('express');
@@ -36,9 +43,12 @@ const WEBHOOK_VERIFY_TOKEN = process.env.WEBHOOK_VERIFY_TOKEN || 'residence2026'
 const CLAUDE_MODEL = 'claude-sonnet-5-5';
 const WHATSAPP_API_VERSION = 'v25.0';
 const PAUSE_HOURS = Number(process.env.PAUSE_HOURS) || 12;
+const STAY_VERIFICATION = String(process.env.STAY_VERIFICATION || '').toLowerCase() !== 'off';
+const MAX_BAD_EMAILS = 3; // au-delà, la vérification automatique est bloquée pour ce numéro
 
 const SITE_URL = 'https://www.locations-residence-industrie.fr';
 const BOOKING_URL = 'https://www.booking.com/Share-4ZhcuX6';
+const ADDRESS_FULL = "11 rue de l'Industrie, 02100 Saint-Quentin";
 
 if (!process.env.WEBHOOK_VERIFY_TOKEN) console.warn('⚠️ WEBHOOK_VERIFY_TOKEN non défini : ancien jeton en dur utilisé. Définissez-en un nouveau.');
 if (!process.env.ADMIN_KEY) console.warn('⚠️ ADMIN_KEY non défini : les routes /status, /test-*, /setup-beds24 et /debug-beds24 sont désactivées.');
@@ -58,7 +68,7 @@ const LONG_STAY_POLICY = `Séjour de 32 nuits ou plus : ne promets AUCUN tarif n
 
 // ==================== PROMPTS ====================
 
-const BASE_SYSTEM_PROMPT = `Tu es l'agent concierge de la Résidence de l'Industrie, un ensemble de 5 logements meublés situés au 11 rue de l'Industrie, 02100 Saint-Quentin.
+const BASE_SYSTEM_PROMPT = `Tu es l'agent concierge de la Résidence de l'Industrie, un ensemble de 5 logements meublés situés à Saint-Quentin (02100).
 
 Tu réponds en français (ou dans la langue du voyageur si nécessaire), avec un ton chaleureux, professionnel et rassurant — comme un vrai concierge d'hôtel.
 Tu es disponible 24h/24 et tu dois toujours apporter une réponse utile et complète.
@@ -67,7 +77,7 @@ RÈGLE FONDAMENTALE : Le voyageur qui te contacte est DÉJÀ sur sa plateforme d
 
 DATE ET HEURE ACTUELLES : {DATETIME}
 
-ADRESSE : 11 rue de l'Industrie, 02100 Saint-Quentin
+{ADDRESS_RULE}
 
 === HORAIRES ===
 - Arrivée : à partir de 15h00 (check-in autonome)
@@ -144,6 +154,7 @@ ADRESSE : 11 rue de l'Industrie, 02100 Saint-Quentin
 {SITE_RULE}
 
 STYLE : chaleureux et professionnel, phrases courtes et claires, solution concrète, ne jamais inventer, ne jamais suggérer d'aller ailleurs. Pas de relance commerciale insistante (ne dis pas "n'oubliez pas de finaliser votre réservation"). Pas d'emoji à chaque message : un seul de temps en temps, au maximum.
+NON-RÉPÉTITION : ne pose JAMAIS deux fois la même question, ne redemande JAMAIS une information que le voyageur a déjà donnée dans la conversation, et ne répète pas d'un message à l'autre les mêmes phrases (excuses, "le propriétaire est prévenu", numéro 112). Si le voyageur n'apporte rien de nouveau, réponds en une ou deux phrases.
 
 FORMAT : tu écris dans une messagerie (WhatsApp, Airbnb, Booking). N'utilise jamais de markdown : pas de ** ni de # ni de titres. Pour une liste, utilise des tirets simples (-). Réponses courtes : 3 à 5 lignes maximum, sauf si le voyageur demande des détails. Un simple remerciement ou au revoir du voyageur : une seule phrase, sans lien et sans relance. Ne répète pas les liens de réservation s'ils ont déjà été donnés.
 
@@ -171,7 +182,7 @@ Si le voyageur demande les disponibilités :
 const ESCALATION_RULES = `=== ESCALADE AU PROPRIÉTAIRE ===
 Tu ne peux RIEN faire en dehors de cette conversation, sauf alerter le propriétaire grâce à une balise (voir plus bas).
 N'écris JAMAIS : "demande enregistrée", "je vérifie", "je fais le nécessaire", "je fais en sorte que...", "votre réservation reste valable", ni aucune promesse de résultat.
-Tu peux écrire "je transmets immédiatement votre message au propriétaire" UNIQUEMENT si tu ajoutes une balise autre que [[ALERTE:aucune]].
+Tu peux écrire "je transmets immédiatement votre message au propriétaire" ou "le propriétaire est prévenu" UNIQUEMENT si tu ajoutes une balise autre que [[ALERTE:aucune]]. Dis-le une seule fois par conversation, sauf si le voyageur apporte une information nouvelle.
 
 À la TOUTE DERNIÈRE ligne de ta réponse, ajoute exactement UNE balise (le voyageur ne la verra pas) :
 [[ALERTE:urgence_acces]] : porte, digicode ou boîte à clé qui ne fonctionne pas, voyageur bloqué dehors
@@ -183,12 +194,25 @@ Tu peux écrire "je transmets immédiatement votre message au propriétaire" UNI
 [[ALERTE:aucune]] : tout le reste (simples informations, questions courantes, remerciements)
 
 Conduite selon la balise :
-- urgence_acces : si le voyageur est vérifié, donne tout de suite le digicode et l'emplacement de la boîte à clé, puis le numéro d'urgence. Sinon, applique la règle de vérification ci-dessus. Dans tous les cas, dis que le propriétaire est prévenu. Ne renvoie pas le voyageur vers la plateforme s'il est bloqué dehors.
+- urgence_acces : si le voyageur est vérifié, donne tout de suite le digicode et l'emplacement de la boîte à clé, puis le numéro d'urgence. Sinon, applique la règle de vérification ci-dessus. Dans tous les cas, dis que le propriétaire est prévenu. Ne renvoie pas le voyageur vers la plateforme s'il est bloqué dehors. Ne demande qu'une seule fois s'il est devant l'immeuble.
 - urgence_technique : excuse-toi, donne le numéro d'urgence seulement si le voyageur est vérifié, dis que le propriétaire est prévenu. Danger vital : 112.
 - plainte : excuse-toi sincèrement, demande le numéro de logement du voyageur s'il est inconnu, dis que tu préviens le propriétaire. N'évoque PAS les sanctions (30 €) devant le voyageur qui se plaint, ne promets pas de résultat. Appel au 17 uniquement en cas de danger ou de trouble grave.
 - contact_humain : ne pose pas de questions inutiles. Dis que tu transmets son message au propriétaire, qui lui répondra personnellement dès que possible. Ne donne aucun numéro personnel.
 - demande_horaire : rappelle le tarif (Airbnb) et que c'est soumis à confirmation, dis que tu transmets la demande au propriétaire qui confirmera. Ne dis jamais que c'est accepté.
 - long_sejour : {LONG_STAY_POLICY}`;
+
+// ----- Adresse : jamais l'adresse exacte sur les plateformes ni sur le chat web -----
+
+const ADDRESS_RULE_PLATFORM = `=== ADRESSE ===
+Sur Airbnb, Booking et le chat web, ne donne JAMAIS l'adresse exacte (ni nom de rue, ni numéro), même si le voyageur insiste ou est déjà vérifié. Dis seulement que la résidence est à Saint-Quentin (02100). L'adresse précise figure dans les informations de réservation et d'arrivée envoyées par la plateforme avant le séjour. Ne la devine pas.`;
+
+const ADDRESS_RULE_VERIFIED = `=== ADRESSE ===
+Adresse exacte (à donner uniquement à ce voyageur vérifié, et seulement s'il la demande) : ${ADDRESS_FULL}`;
+
+const ADDRESS_RULE_UNVERIFIED = `=== ADRESSE ===
+Voyageur non vérifié : ne donne pas l'adresse exacte (ni nom de rue, ni numéro), seulement "Saint-Quentin (02100)".`;
+
+// ----- Sécurité selon le statut de vérification -----
 
 const RULES_WITH_BOOKING = `Le voyageur a une réservation CONFIRMÉE et active.
 Si le voyageur demande les codes d'accès, donne-les LUI DIRECTEMENT et immédiatement :
@@ -202,10 +226,18 @@ NE PAS communiquer : digicode, codes boîtes à clé, mot de passe Wi-Fi.
 Si demande de codes : "Ces informations sont envoyées automatiquement avant votre arrivée via la plateforme de réservation. Si vous ne les avez pas reçues, vérifiez vos messages et spams sur la plateforme utilisée."`;
 
 const RULES_WITHOUT_BOOKING_WHATSAPP = `Ce numéro WhatsApp n'est pas (encore) rattaché à une réservation vérifiée.
-NE PAS communiquer : digicode, codes boîtes à clé, mot de passe Wi-Fi, ni le numéro d'urgence.
-Si le voyageur demande un code, dit qu'il est bloqué ou affirme avoir une réservation : demande-lui son NOM DE FAMILLE tel qu'il figure sur la réservation. Si son numéro WhatsApp ne correspond pas à celui de la réservation, demande aussi l'adresse email de la réservation. Le système vérifie automatiquement ces informations dès qu'elles sont écrites : tu ne vérifies rien toi-même, et tu ne dis jamais si une réservation existe ou non à tel nom.
-Si le voyageur a déjà donné son nom et que tu n'as toujours pas de voyageur vérifié : dis que tu n'arrives pas à rattacher ces informations à une réservation, demande l'email de la réservation, et dis que le propriétaire est prévenu.
+NE PAS communiquer : digicode, codes boîtes à clé, mot de passe Wi-Fi, numéro d'urgence, adresse exacte.
+Si le voyageur demande un code, dit qu'il est bloqué ou affirme avoir une réservation :
+- Demande-lui en UN SEUL message : son nom de famille ET son prénom tels qu'ils figurent sur la réservation, les dates du séjour (arrivée et départ) et le numéro du logement. L'adresse email de la réservation est une alternative, s'il la connaît.
+- Le système vérifie automatiquement dès que ces informations sont écrites dans la conversation : tu ne vérifies rien toi-même. Ne dis JAMAIS si une réservation existe ou non à tel nom, et ne répète jamais le nom, l'email ou les dates comme "introuvables" ou "non reconnus".
+- Ne redemande JAMAIS une information déjà donnée (nom, prénom, dates, logement, email). Ne demande pas de confirmer ce que le voyageur vient de dire. Si un seul mot est donné (ex. "Karim") sans autre précision, demande une seule fois s'il s'agit du nom de famille ou du prénom.
+- N'invite JAMAIS le voyageur à essayer plusieurs adresses email ni à en deviner une : demande l'email de la réservation une seule fois, et seulement s'il le connaît.
+- Si les informations données ne suffisent pas : écris "Je ne parviens pas à confirmer votre identité automatiquement" (sans dire ce qui ne correspond pas), dis une seule fois que le propriétaire est prévenu et le recontactera personnellement sur ce numéro WhatsApp, et invite le voyageur à rester joignable. Aucune nouvelle demande d'email ensuite.
+- Voyageur bloqué dehors : reste bref et rassurant, sans répéter les mêmes phrases ; mentionne le 112 une seule fois, uniquement en cas de danger.
 Un voyageur qui n'a pas encore de réservation peut simplement réserver (voir SITE INTERNET).`;
+
+const RULES_WHATSAPP_LOCKED = `
+La vérification automatique de ce numéro est BLOQUÉE (trop de tentatives). Ne demande plus AUCUNE information d'identité (ni nom, ni email, ni dates). Dis une seule fois que le propriétaire est prévenu et reviendra personnellement vers le voyageur sur ce numéro, puis réponds brièvement sans rien communiquer de confidentiel.`;
 
 const EMERGENCY_WITH_BOOKING = `En cas de panne, incident technique, dégât des eaux, impossibilité d'accéder au logement ou plainte grave signalés par le voyageur, donner ce numéro : 06 62 52 43 81. S'excuser et assurer une intervention rapide. Ne donner ce numéro QUE si un incident réel est signalé.`;
 
@@ -260,6 +292,13 @@ function normalizeText(s) {
 
 function tokens(s) {
   return normalizeText(s).split(/[^a-z0-9]+/).filter(t => t.length >= 2);
+}
+
+// Particules de noms ("El Amrani", "Ben Ali", "de la Tour") : le voyageur ne les écrit pas toujours
+const NAME_PARTICLES = new Set(['de', 'du', 'la', 'le', 'les', 'el', 'al', 'ben', 'bin', 'van', 'von', 'des', 'da', 'di', 'dos', 'ait']);
+function significantTokens(list) {
+  const s = list.filter(t => !NAME_PARTICLES.has(t));
+  return s.length ? s : list;
 }
 
 // Clé de comparaison de téléphone : 9 derniers chiffres (indépendant de +33 / 0 / 0033)
@@ -329,6 +368,16 @@ function rateLimit(key, max, windowMs) {
   return true;
 }
 
+// ==================== ADRESSE : filet de sécurité ====================
+// Même si le modèle se trompe, l'adresse exacte est retirée des réponses qui ne doivent pas la contenir.
+
+const ADDRESS_RE = /(?:\bau\s+)?(?:\b11\s*,?\s*)?\b(?:rue|r\.)\s+de\s+l['’]\s*industrie\b(?:\s*,?\s*02100(?:\s*saint-quentin)?|\s*,?\s*saint-quentin)?/gi;
+
+function applyAddressPolicy(reply, allowAddress) {
+  if (allowAddress) return reply;
+  return String(reply || '').replace(ADDRESS_RE, m => (/^au\s/i.test(m) ? 'à ' : '') + 'Saint-Quentin (02100)');
+}
+
 // ==================== BEDS24 : TOKEN ====================
 
 let beds24Token = null;
@@ -394,6 +443,16 @@ async function getPropertyInfo() {
   }
 }
 
+// Séjour actif : du jour qui précède l'arrivée jusqu'au jour du départ INCLUS (heure de Paris).
+// (Avant : la fenêtre se fermait à minuit au début du jour de départ, donc plus de codes le matin du départ.)
+function isActiveStay(b, today = parisToday()) {
+  const a = String(b?.arrival || '').slice(0, 10);
+  const d = String(b?.departure || '').slice(0, 10);
+  if (!a || !d) return false;
+  return addDays(a, -1) <= today && today <= d;
+}
+const isActiveWindow = b => isActiveStay(b);
+
 // Réservations actives (cache 60 s pour ne pas interroger Beds24 à chaque message)
 let activeBookingsCache = { at: 0, data: [] };
 
@@ -403,24 +462,16 @@ async function getAllActiveBookings() {
     const token = await getBeds24Token();
     if (!token) return [];
 
-    const now = new Date();
-    const dateFrom = new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString().split('T')[0];
-
-    // departureFrom = hier pour capturer tous les séjours en cours
+    const today = parisToday();
     const response = await fetchT(
-      `https://beds24.com/api/v2/bookings?departureFrom=${dateFrom}&status=confirmed&maxResults=50`,
+      `https://beds24.com/api/v2/bookings?departureFrom=${addDays(today, -1)}&arrivalTo=${addDays(today, 1)}&status=confirmed&maxResults=100`,
       { headers: { 'token': token } }
     );
     const raw = await response.json();
     const bookings = raw?.data || raw;
     if (!Array.isArray(bookings)) return [];
 
-    const tomorrow = new Date(now.getTime() + 24 * 60 * 60 * 1000);
-    const active = bookings.filter(b => {
-      const arrival = new Date(b.arrival);
-      const departure = new Date(b.departure);
-      return arrival <= tomorrow && departure >= now;
-    });
+    const active = bookings.filter(b => isActiveStay(b, today));
     activeBookingsCache = { at: Date.now(), data: active };
     return active;
   } catch (err) {
@@ -430,11 +481,14 @@ async function getAllActiveBookings() {
 }
 
 // ---------- Vérification d'identité ----------
-// Règle : 2 critères sur 3 (nom, téléphone, email), comparaison EXACTE (plus de sous-chaînes).
+// Règle : 2 critères sur 4 (nom, téléphone, email, séjour), comparaison EXACTE (plus de sous-chaînes).
+// Le critère "séjour" (WhatsApp seulement) = dates exactes d'arrivée et de départ + numéro du logement.
+// NB : pour une réservation Airbnb/Booking, l'email stocké dans Beds24 est une adresse relais que le voyageur
+// ne connaît pas, et le téléphone est souvent absent : sans critère "séjour", ces voyageurs ne peuvent pas être vérifiés.
 
 function lastNameTokens(b) {
-  const ln = tokens(b.lastName);
-  return ln.length ? ln : tokens(b.firstName);
+  const ln = significantTokens(tokens(b.lastName));
+  return ln.length ? ln : significantTokens(tokens(b.firstName));
 }
 
 // Chat web : l'utilisateur fournit nom / téléphone / email
@@ -484,36 +538,93 @@ async function verifyGuestIdentity(provided) {
 const EMAIL_RE = /[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/gi;
 const PHONE_RE = /(?:\+|00)?\d[\d .-]{7,}\d/g;
 
+// Dates "du 9 au 12" / "9/11 au 12/11" : jour d'arrivée puis jour de départ de la réservation
+function stayDatesMatch(b, normText) {
+  const a = String(b?.arrival || '').slice(8, 10);
+  const d = String(b?.departure || '').slice(8, 10);
+  if (a.length !== 2 || d.length !== 2) return false;
+  const da = String(parseInt(a, 10));
+  const dd = String(parseInt(d, 10));
+  if (da === 'NaN' || dd === 'NaN') return false;
+  const re = new RegExp(`(?<!\\d)0?${da}(?!\\d)(?:[\\/.\\-]\\d{1,2})?[^\\d]{1,30}?(?<!\\d)0?${dd}(?!\\d)`);
+  return re.test(String(normText || ''));
+}
+
+// Numéros de logement cités ("logement 1", "appartement 3", "Agate"...)
+function extractUnits(normText) {
+  const s = new Set();
+  const t = String(normText || '');
+  for (const m of t.matchAll(/(?:logement|appartement|appart|studio|chambre)\s*(?:n°|no|numero|num)?\s*([1-5])(?!\d)/g)) s.add(Number(m[1]));
+  for (const l of AIRBNB_LINKS) if (l.mots.some(w => t.includes(w))) s.add(l.num);
+  return s;
+}
+
+function waNameMatches(b, words) {
+  const base = lastNameTokens(b);
+  return base.length > 0 && base.every(t => words.has(t));
+}
+
 function waIdentityScore(b, ctx) {
   let score = 0;
   const reasons = [];
   const bk = phoneKey(b.phone || b.mobile || '');
-  if (bk && (bk === ctx.fromKey || ctx.typedPhoneKeys.includes(bk))) { score++; reasons.push('téléphone'); }
-  if (b.email && ctx.emails.includes(String(b.email).toLowerCase().trim())) { score++; reasons.push('email'); }
-  const lt = lastNameTokens(b);
-  if (lt.length && lt.every(t => ctx.words.has(t))) { score++; reasons.push('nom'); }
+  if (bk && (bk === ctx.fromKey || (ctx.typedPhoneKeys || []).includes(bk))) { score++; reasons.push('téléphone'); }
+  if (b.email && (ctx.emails || []).includes(String(b.email).toLowerCase().trim())) { score++; reasons.push('email'); }
+  if (waNameMatches(b, ctx.words)) { score++; reasons.push('nom'); }
+  if (STAY_VERIFICATION && ctx.text && ctx.units && ctx.roomNumbers) {
+    const unit = ctx.roomNumbers.get(String(b.roomId));
+    if (unit && ctx.units.has(unit) && stayDatesMatch(b, ctx.text)) { score++; reasons.push('séjour'); }
+  }
   return { score, reasons };
 }
 
 async function identifyWhatsAppGuest(from, history, text) {
   try {
-    const bookings = await getAllActiveBookings();
-    if (!bookings.length) return null;
-
     const conv = ensureConv(from);
+
+    // Voyageur déjà vérifié (automatiquement ou par /valider du propriétaire)
     if (conv.verifiedBookingId) {
-      const known = bookings.find(x => String(x.id) === String(conv.verifiedBookingId));
+      let known = (await getAllActiveBookings()).find(x => String(x.id) === String(conv.verifiedBookingId));
+      if (!known) {
+        const b = await getBookingById(conv.verifiedBookingId);
+        if (b && String(b.status || '').toLowerCase() !== 'cancelled' && isActiveStay(b)) known = b;
+      }
       if (known) return known;
       conv.verifiedBookingId = null;
     }
+    if (conv.locked) return null;
 
-    const joined = [...history.filter(m => m.role === 'user').map(m => m.content), text].join(' \n ');
+    const bookings = await getAllActiveBookings();
+    if (!bookings.length) return null;
+    const propInfo = await getPropertyInfo();
+
+    // Tout ce que le voyageur a écrit depuis le début (l'historique de 10 messages ne suffit pas : il oublie le début)
+    const joined = [conv.identityText || '', ...history.filter(m => m.role === 'user').map(m => m.content), text].join(' \n ');
+    const normJoined = normalizeText(joined);
+    const roomNumbers = new Map();
+    for (const r of (propInfo?.rooms || [])) {
+      const n = normalizeText(r.name);
+      const l = AIRBNB_LINKS.find(x => x.mots.some(m => n.includes(m)));
+      if (l) roomNumbers.set(String(r.id), l.num);
+    }
     const ctx = {
       fromKey: phoneKey(from),
       typedPhoneKeys: (joined.match(PHONE_RE) || []).map(phoneKey).filter(Boolean),
       emails: (joined.match(EMAIL_RE) || []).map(e => e.toLowerCase()),
-      words: new Set(normalizeText(joined).split(/[^a-z0-9]+/).filter(Boolean))
+      words: new Set(normJoined.split(/[^a-z0-9]+/).filter(Boolean)),
+      text: normJoined,
+      units: extractUnits(normJoined),
+      roomNumbers
     };
+
+    // Anti-devinette : trop d'adresses email qui ne correspondent à aucune réservation => blocage, le propriétaire reprend la main
+    const knownEmails = new Set(bookings.map(b => String(b.email || '').toLowerCase().trim()).filter(Boolean));
+    const badEmails = new Set(ctx.emails.filter(e => !knownEmails.has(e)));
+    if (badEmails.size > MAX_BAD_EMAILS) {
+      conv.locked = true;
+      console.warn('🔒 Vérification WhatsApp bloquée (trop d\'emails essayés) pour ...' + String(from).slice(-3));
+      return null;
+    }
 
     let best = null;
     for (const b of bookings) {
@@ -529,6 +640,20 @@ async function identifyWhatsAppGuest(from, history, text) {
   } catch (err) {
     console.error('Erreur identifyWhatsAppGuest:', err.message);
     return null;
+  }
+}
+
+// Réservations actives qui ressemblent à ce que dit le voyageur (pour aider le propriétaire à valider à la main)
+async function candidateBookings(text, limit = 3) {
+  try {
+    const bookings = await getAllActiveBookings();
+    const norm = normalizeText(text);
+    const words = new Set(norm.split(/[^a-z0-9]+/).filter(w => w.length >= 3));
+    return bookings.filter(b =>
+      [...tokens(b.firstName), ...tokens(b.lastName)].some(t => t.length >= 3 && words.has(t)) || stayDatesMatch(b, norm)
+    ).slice(0, limit);
+  } catch (err) {
+    return [];
   }
 }
 
@@ -585,6 +710,7 @@ function availabilityRules() {
 - Si l'outil renvoie une erreur : dis que la vérification est momentanément indisponible, ne garantis rien, et donne les liens de réservation (selon PRÉSENTATION DES MOYENS DE RÉSERVATION).
 - Sans dates précises : demande la date d'arrivée et la date de départ.
 - La réservation n'est confirmée qu'une fois effectuée en ligne.
+- Attention : si le voyageur donne des dates en disant qu'il a DÉJÀ une réservation ou qu'il est bloqué devant l'immeuble, ce ne sont pas des dates à vérifier : n'appelle pas l'outil, c'est une vérification d'identité.
 Calendrier des prochains jours (pour convertir jours de la semaine et dates) :
 ${calendarHint()}`;
 }
@@ -638,7 +764,7 @@ async function checkAvailability(arrival, departure) {
 
 const TOOLS = [{
   name: 'check_availability',
-  description: "Vérifie en temps réel quels logements de la Résidence sont libres ou occupés pour un séjour (nuit d'arrivée incluse, jour de départ exclu). À appeler dès que le voyageur a donné ou confirmé des dates d'arrivée et de départ.",
+  description: "Vérifie en temps réel quels logements de la Résidence sont libres ou occupés pour un séjour (nuit d'arrivée incluse, jour de départ exclu). À appeler dès que le voyageur a donné ou confirmé des dates d'arrivée et de départ pour une NOUVELLE réservation.",
   input_schema: {
     type: 'object',
     properties: {
@@ -687,7 +813,7 @@ Le voyageur t'écrit via Booking. Le tarif Airbnb d'arrivée anticipée / dépar
 Tu ne sais pas si le voyageur écrit via Airbnb ou Booking. Pour une arrivée anticipée ou un départ tardif, ne cite AUCUN tarif : transmets la demande au propriétaire (balise demande_horaire). Ne donne de liens de réservation que si le voyageur les demande.`;
 }
 
-function buildSystemPrompt({ propInfo = null, roomInfo = null, booking = null, isLoyal = false, channel = 'platform', linksSent = false, platform = null } = {}) {
+function buildSystemPrompt({ propInfo = null, roomInfo = null, booking = null, isLoyal = false, channel = 'platform', linksSent = false, platform = null, locked = false } = {}) {
   const wa = channel === 'whatsapp';
   const hasBooking = !!booking && !!propInfo;
 
@@ -696,6 +822,10 @@ function buildSystemPrompt({ propInfo = null, roomInfo = null, booking = null, i
   prompt = fill(prompt, '{AVAILABILITY}', availabilityRules());
   prompt = fill(prompt, '{BOOKING_FORMAT}', bookingFormatRules());
 
+  // L'adresse exacte n'est donnée qu'à un voyageur vérifié sur WhatsApp, jamais sur les plateformes ni sur le chat web
+  prompt = fill(prompt, '{ADDRESS_RULE}',
+    !wa ? ADDRESS_RULE_PLATFORM : (hasBooking ? ADDRESS_RULE_VERIFIED : ADDRESS_RULE_UNVERIFIED));
+
   if (hasBooking) {
     let rules = RULES_WITH_BOOKING;
     rules = fill(rules, '{DIGICODE}', propInfo.digicode);
@@ -703,7 +833,8 @@ function buildSystemPrompt({ propInfo = null, roomInfo = null, booking = null, i
     prompt = fill(prompt, '{SECURITY_RULES}', rules);
     prompt = fill(prompt, '{EMERGENCY_RULE}', EMERGENCY_WITH_BOOKING);
   } else {
-    prompt = fill(prompt, '{SECURITY_RULES}', wa ? RULES_WITHOUT_BOOKING_WHATSAPP : RULES_WITHOUT_BOOKING);
+    const secRules = wa ? RULES_WITHOUT_BOOKING_WHATSAPP + (locked ? RULES_WHATSAPP_LOCKED : '') : RULES_WITHOUT_BOOKING;
+    prompt = fill(prompt, '{SECURITY_RULES}', secRules);
     prompt = fill(prompt, '{EMERGENCY_RULE}', wa ? EMERGENCY_WITHOUT_BOOKING_WHATSAPP : EMERGENCY_WITHOUT_BOOKING);
   }
 
@@ -768,6 +899,12 @@ function parseAlert(raw, userText) {
     .replace(/\n{3,}/g, '\n\n').trim();
   if (!category) category = fallbackCategory(userText);
   if (category !== 'aucune' && !ALERT_META[category]) category = 'aucune';
+  // Si le bot annonce qu'il prévient le propriétaire sans balise, on déclenche quand même l'alerte :
+  // sinon la promesse faite au voyageur serait fausse.
+  if (category === 'aucune') {
+    const r = normalizeText(reply);
+    if (/proprietaire/.test(r) && /(transmets|transmis|previens|prevenu|alerte)/.test(r)) category = 'contact_humain';
+  }
   return { reply, category };
 }
 
@@ -778,30 +915,67 @@ function getOwnerNumber() {
   return normalizeWaNumber(process.env.OWNER_PHONE || '');
 }
 
-async function notifyOwner({ channel, contact, question, reply, category = 'aucune', booking = null, bookingId = null }) {
+// Alertes : un message complet la première fois, puis seulement une ligne de suite pendant 10 minutes (pas de spam)
+const alertCooldown = new Map();
+const ALERT_COOLDOWN_MS = 10 * 60 * 1000;
+
+// Retourne true si le propriétaire a été joint (ou s'il n'y avait rien à envoyer), false si l'envoi a échoué
+async function notifyOwner({ channel, contact, question, reply, category = 'aucune', booking = null, bookingId = null, profileName = null, locked = false }) {
   try {
     const meta = ALERT_META[category];
-    if (!meta && process.env.NOTIFY_ALL !== 'true') return;
+    if (!meta && process.env.NOTIFY_ALL !== 'true') return true;
     const owner = getOwnerNumber();
-    if (!owner) return;
+    if (!owner) { console.warn('⚠️ OWNER_PHONE non défini : alerte non envoyée'); return false; }
     const contactDigits = String(contact).replace(/\D/g, '');
-    if (channel === 'WhatsApp' && owner === contactDigits) return; // inutile de se notifier soi-même
+    if (channel === 'WhatsApp' && owner === contactDigits) return true; // inutile de se notifier soi-même
+
+    if (channel === 'WhatsApp') lastNotified = contactDigits;
+    else if (String(channel).startsWith('Beds24') && bookingId) lastNotified = `b${bookingId}`;
+
+    const cdKey = `${channel}|${contact}|${category}`;
+    if (meta && Date.now() - (alertCooldown.get(cdKey) || 0) < ALERT_COOLDOWN_MS) {
+      const line = `↪️ Suite ${channel === 'WhatsApp' ? '+' + contactDigits : contact} : « ${String(question).substring(0, 300)} »${booking ? '' : ' (non vérifié)'}`;
+      return await sendWhatsAppReply(owner, line);
+    }
 
     const who = booking
       ? `Voyageur vérifié : ${booking.firstName || ''} ${booking.lastName || ''} (logement ${booking.roomId}, du ${booking.arrival} au ${booking.departure})`
       : 'Voyageur NON vérifié';
     const head = meta ? `${meta.icon} ${meta.label}` : '📱 Message';
-    let msg = `${head}\nCanal : ${channel}\nDe : ${channel === 'WhatsApp' ? '+' + contactDigits : contact}\n${who}\n\nMessage : ${String(question).substring(0, 800)}\n\nRéponse envoyée : ${String(reply).substring(0, 1500)}`;
+    let msg = `${head}\nCanal : ${channel}\nDe : ${channel === 'WhatsApp' ? '+' + contactDigits : contact}`;
+    if (profileName) msg += `\nProfil WhatsApp : ${profileName}`;
+    msg += `\n${who}`;
+    if (locked) msg += '\n🔒 Vérification automatique bloquée (trop d\'emails essayés)';
+    msg += `\n\nMessage : ${String(question).substring(0, 800)}\n\nRéponse envoyée : ${String(reply).substring(0, 1200)}`;
+
     if (channel === 'WhatsApp') {
-      lastNotified = contactDigits;
+      // Aide à la validation manuelle d'un voyageur bloqué dehors
+      if (!booking && (category === 'urgence_acces' || category === 'contact_humain')) {
+        const conv = conversations.get(contactDigits);
+        const heard = [conv?.identityText || '', question].join(' ');
+        const cands = await candidateBookings(heard);
+        if (cands.length) {
+          const propInfo = await getPropertyInfo();
+          const lines = cands.map(b => {
+            const room = propInfo?.rooms?.find(r => String(r.id) === String(b.roomId))?.name || b.roomId;
+            return `- ${b.firstName || ''} ${b.lastName || ''}, logement ${room}, du ${b.arrival} au ${b.departure}\n /valider b${b.id} ${contactDigits}`;
+          });
+          msg += `\n\nRéservations possibles (envoyez la commande pour confirmer ce voyageur) :\n${lines.join('\n')}`;
+        } else {
+          msg += '\n\nAucune réservation active ne correspond. Si vous reconnaissez le voyageur : /valider bIDRÉSERVATION ' + contactDigits;
+        }
+      }
       msg += `\n\nPour couper le bot sur cette conversation : /pause ${contactDigits}`;
     } else if (String(channel).startsWith('Beds24') && bookingId) {
-      lastNotified = `b${bookingId}`;
       msg += `\n\nPour couper le bot sur cette réservation : /pause b${bookingId}`;
     }
-    await sendWhatsAppReply(owner, msg.substring(0, 4000));
+
+    const ok = await sendWhatsAppReply(owner, msg.substring(0, 4000));
+    if (ok && meta) alertCooldown.set(cdKey, Date.now());
+    return ok;
   } catch (err) {
     console.error('Erreur notifyOwner:', err.message);
+    return false;
   }
 }
 
@@ -809,12 +983,12 @@ async function notifyOwner({ channel, contact, question, reply, category = 'aucu
 
 const MEMORY_MAX_MESSAGES = 10; // 5 échanges (question + réponse)
 const MEMORY_TTL_MS = 24 * 60 * 60 * 1000; // 24 h, comme la fenêtre WhatsApp
-const conversations = new Map(); // numéro -> { messages, updated, verifiedBookingId, linksSent, lastWasCourtesy }
+const conversations = new Map(); // numéro -> { messages, updated, verifiedBookingId, linksSent, lastWasCourtesy, identityText, locked, notifyFailAt }
 
 function ensureConv(phone) {
   let conv = conversations.get(phone);
   if (!conv || Date.now() - conv.updated > MEMORY_TTL_MS) {
-    conv = { messages: [], updated: Date.now(), verifiedBookingId: null, linksSent: false, lastWasCourtesy: false };
+    conv = { messages: [], updated: Date.now(), verifiedBookingId: null, linksSent: false, lastWasCourtesy: false, identityText: '', locked: false, notifyFailAt: 0 };
     conversations.set(phone, conv);
   }
   return conv;
@@ -881,9 +1055,14 @@ setInterval(() => {
   for (const [id, t] of seenWaIds) if (now - t > 6 * 3600 * 1000) seenWaIds.delete(id);
   for (const [n, until] of pauses) if (now > until) pauses.delete(n);
   for (const [k, t] of courtesyAt) if (now - t > COURTESY_WINDOW_MS) courtesyAt.delete(k);
+  for (const [k, t] of alertCooldown) if (now - t > ALERT_COOLDOWN_MS) alertCooldown.delete(k);
   for (const [k, arr] of rateBuckets) {
     const fresh = arr.filter(t => now - t < 3600 * 1000);
     if (fresh.length) rateBuckets.set(k, fresh); else rateBuckets.delete(k);
+  }
+  if (processedMessages.size > 5000) { // l'ensemble ne doit pas grossir sans fin
+    let n = processedMessages.size - 3000;
+    for (const id of processedMessages) { if (n-- <= 0) break; processedMessages.delete(id); }
   }
 }, 60 * 60 * 1000).unref();
 
@@ -1023,12 +1202,26 @@ async function handleOwnerCommand(text) {
     resumeConversation(target);
     return say(`▶️ Bot réactivé pour ${pauseLabel(target)}.`);
   }
+  if (cmd === '/valider') {
+    const phone = numArg ? normalizeWaNumber(numArg) : (lastNotified && !String(lastNotified).startsWith('b') ? lastNotified : null);
+    if (!bArg || !phone) return say('Usage : /valider bIDRÉSERVATION [numéro WhatsApp du voyageur]\nExemple : /valider b95878640 33612345678');
+    const b = await getBookingById(bArg.slice(1));
+    if (!b) return say(`Réservation ${bArg} introuvable.`);
+    const conv = ensureConv(phone);
+    conv.verifiedBookingId = b.id;
+    conv.locked = false;
+    resumeConversation(phone);
+    await say(`✅ +${phone} validé : ${b.firstName || ''} ${b.lastName || ''}, du ${b.arrival} au ${b.departure}. Le bot lui envoie ses informations d'accès.`);
+    // Le voyageur reçoit tout de suite ses informations, sans avoir à réécrire
+    await handleWhatsAppMessage({ from: phone, type: 'text', text: { body: "Le propriétaire a confirmé ma réservation. Pouvez-vous me donner les informations d'accès ?" } });
+    return;
+  }
   if (cmd === '/statut') {
     const list = [...pauses.entries()].filter(([n]) => isPaused(n))
       .map(([n, until]) => `- ${pauseLabel(n)} (jusqu'à ${new Date(until).toLocaleString('fr-FR', { timeZone: 'Europe/Paris' })})`);
     return say(list.length ? `Conversations en pause :\n${list.join('\n')}` : 'Aucune conversation en pause.');
   }
-  return say('Commandes :\n/pause [numéro ou bIDRÉSERVATION] [heures] : le bot se tait (sans argument : dernière alerte)\n/reprise [numéro ou bIDRÉSERVATION] : le bot reprend\n/statut : conversations en pause');
+  return say('Commandes :\n/pause [numéro ou bIDRÉSERVATION] [heures] : le bot se tait (sans argument : dernière alerte)\n/reprise [numéro ou bIDRÉSERVATION] : le bot reprend\n/valider bIDRÉSERVATION [numéro] : confirme un voyageur WhatsApp et lui envoie ses accès\n/statut : conversations en pause');
 }
 
 async function handleWhatsAppMessage(message) {
@@ -1044,7 +1237,7 @@ async function handleWhatsAppMessage(message) {
       lastNonTextReply.set(from, Date.now());
       await sendWhatsAppReply(from, "Merci pour votre message. Je ne peux lire que le texte : pourriez-vous l'écrire en quelques mots ? Je transmets aussi votre envoi au propriétaire.");
     }
-    await notifyOwner({ channel: 'WhatsApp', contact: from, question: `[${message.type}]`, reply: 'Réponse automatique : demande de message écrit', category: 'message_non_texte' });
+    await notifyOwner({ channel: 'WhatsApp', contact: from, question: `[${message.type}]`, reply: 'Réponse automatique : demande de message écrit', category: 'message_non_texte', profileName: message._profileName });
     return;
   }
 
@@ -1059,6 +1252,9 @@ async function handleWhatsAppMessage(message) {
   }
 
   if (isPaused(from)) { console.log('⏸️ Conversation en pause, pas de réponse'); return; }
+
+  // Limite de débit par expéditeur (coût IA et abus)
+  if (!rateLimit('wa:' + from, 40, 10 * 60 * 1000)) { console.warn('🚦 Trop de messages de ...' + from.slice(-3) + ', ignoré'); return; }
 
   const history = getHistory(from);
   const lastMsg = history.length ? history[history.length - 1] : null;
@@ -1077,27 +1273,39 @@ async function handleWhatsAppMessage(message) {
     return;
   }
 
+  // Tout ce que le voyageur écrit sert à la vérification (nom, dates, logement, email), même hors des 10 derniers messages
+  const conv = ensureConv(from);
+  conv.identityText = ((conv.identityText || '') + ' \n ' + text).slice(-4000);
+  conv.lastWasCourtesy = false;
+
   const [propInfo, booking] = await Promise.all([getPropertyInfo(), identifyWhatsAppGuest(from, history, text)]);
   const roomInfo = booking && propInfo ? propInfo.rooms.find(r => String(r.id) === String(booking.roomId)) || null : null;
-  const conv = ensureConv(from);
-  conv.lastWasCourtesy = false;
-  const systemPrompt = buildSystemPrompt({ propInfo, roomInfo, booking, isLoyal: false, channel: 'whatsapp', linksSent: conv.linksSent });
+  const verified = !!booking && !!propInfo;
+  const systemPrompt = buildSystemPrompt({ propInfo, roomInfo, booking, isLoyal: false, channel: 'whatsapp', linksSent: conv.linksSent, locked: conv.locked });
 
   console.log('➡️ Appel Claude...');
   const raw = await generateAIReply(text, systemPrompt, history);
   const parsed = raw ? parseAlert(raw, text) : null;
+  if (parsed) parsed.reply = applyAddressPolicy(parsed.reply, verified);
   console.log('⬅️ Réponse Claude:', parsed ? parsed.reply.substring(0, 60) : 'AUCUNE', '| alerte:', parsed ? parsed.category : '-');
 
   if (!parsed || !parsed.reply) {
     const msg = 'Désolé, je rencontre un souci technique momentané. Je transmets votre message au propriétaire, qui vous répondra dès que possible.';
     await sendWhatsAppReply(from, msg);
-    await notifyOwner({ channel: 'WhatsApp', contact: from, question: text, reply: msg, category: 'erreur_ia', booking });
+    await notifyOwner({ channel: 'WhatsApp', contact: from, question: text, reply: msg, category: 'erreur_ia', booking, profileName: message._profileName });
     return;
   }
 
   addToHistory(from, text, parsed.reply);
   await sendWhatsAppReply(from, parsed.reply);
-  await notifyOwner({ channel: 'WhatsApp', contact: from, question: text, reply: parsed.reply, category: parsed.category, booking });
+  const notified = await notifyOwner({ channel: 'WhatsApp', contact: from, question: text, reply: parsed.reply, category: parsed.category, booking, profileName: message._profileName, locked: conv.locked });
+
+  // Le bot a dit "le propriétaire est prévenu" : si l'envoi a échoué, on ne laisse pas le voyageur croire que c'est le cas
+  if (notified === false && parsed.category !== 'aucune' && Date.now() - (conv.notifyFailAt || 0) > 30 * 60 * 1000) {
+    conv.notifyFailAt = Date.now();
+    console.error('❗ Alerte propriétaire NON envoyée alors que le voyageur a été informé');
+    await sendWhatsAppReply(from, "Je n'ai pas réussi à prévenir le propriétaire automatiquement pour le moment. Vous pouvez aussi lui écrire directement via la plateforme où vous avez réservé (Airbnb ou Booking) en précisant votre situation.");
+  }
 }
 
 app.get('/webhook', (req, res) => {
@@ -1124,8 +1332,10 @@ app.post('/webhook', async (req, res) => {
     for (const entry of body.entry || []) {
       for (const change of entry.changes || []) {
         const value = change.value || {};
+        const names = new Map((value.contacts || []).map(c => [String(c.wa_id), c.profile?.name || null]));
         for (const message of value.messages || []) {
           if (alreadySeen(message.id)) continue;
+          message._profileName = names.get(String(message.from)) || null;
           await runSerial(String(message.from), () =>
             handleWhatsAppMessage(message).catch(err => console.error('Erreur message WhatsApp:', err.message)));
         }
@@ -1152,12 +1362,6 @@ function messageSource(msg) {
 
 function messageText(msg) {
   return String(msg.message || msg.text || '').trim();
-}
-
-// Séjour en cours ou qui commence dans moins de 24 h (même règle que pour WhatsApp)
-function isActiveWindow(b, now = new Date()) {
-  const tomorrow = new Date(now.getTime() + 24 * 60 * 60 * 1000);
-  return new Date(b.arrival) <= tomorrow && new Date(b.departure) >= now;
 }
 
 // Plateforme d'origine de la réservation, d'après la fiche Beds24
@@ -1250,7 +1454,7 @@ async function handleBeds24Group(token, propInfo, bookingId, group, all) {
   // Réservation retrouvée par son numéro : plus de confusion possible entre deux voyageurs du même logement
   const booking = await getBookingById(bookingId);
   const confirmed = booking && String(booking.status || '').toLowerCase() === 'confirmed';
-  const activeBooking = confirmed && isActiveWindow(booking) ? booking : null;
+  const activeBooking = confirmed && isActiveStay(booking) ? booking : null;
   const platform = detectPlatform(booking);
   const roomInfo = activeBooking && propInfo ? propInfo.rooms.find(r => String(r.id) === String(activeBooking.roomId)) || null : null;
   const isLoyal = (await countGuestBookings(booking?.email || null)) >= 3;
@@ -1259,6 +1463,7 @@ async function handleBeds24Group(token, propInfo, bookingId, group, all) {
   const systemPrompt = buildSystemPrompt({ propInfo, roomInfo, booking: activeBooking, isLoyal, channel: 'platform', platform });
   const rawReply = await runConversation({ system: systemPrompt, messages: mergeRoles([...history, { role: 'user', content: combined }]) });
   const parsed = rawReply ? parseAlert(rawReply, combined) : null;
+  if (parsed) parsed.reply = applyAddressPolicy(parsed.reply, false); // jamais l'adresse exacte sur les plateformes
 
   let ok = false;
   if (parsed && parsed.reply) {
@@ -1367,6 +1572,7 @@ app.get('/status', requireAdmin, async (req, res) => {
     anthropic: process.env.ANTHROPIC_KEY ? 'configuré' : 'manquant',
     whatsapp: process.env.WHATSAPP_TOKEN ? 'configuré' : 'manquant',
     signatureWhatsApp: process.env.WHATSAPP_APP_SECRET ? 'vérifiée' : 'NON vérifiée',
+    verificationParSejour: STAY_VERIFICATION ? 'activée' : 'désactivée',
     logements: propInfo?.rooms?.length || 0,
     reservationsActives: activeBookings.length,
     voyageursActifs: activeBookings.map(b => `${b.firstName} ${b.lastName} (logement ${b.roomId})`),
@@ -1430,9 +1636,11 @@ app.get('/test-beds24-booking', requireAdmin, async (req, res) => {
       champs_disponibles: Object.keys(b),
       status: b.status, channel: b.channel ?? null, apiSource: b.apiSource ?? null, referer: b.referer ?? null,
       arrivee: b.arrival, depart: b.departure, roomId: b.roomId,
+      email_est_une_adresse_relais: /@(guest|m|reply)\.(airbnb|booking)\.com/i.test(String(b.email || '')),
+      telephone_present: !!(b.phone || b.mobile),
       plateforme_detectee: detectPlatform(b),
-      dans_la_fenetre_active: isActiveWindow(b),
-      codes_autorises: String(b.status || '').toLowerCase() === 'confirmed' && isActiveWindow(b)
+      dans_la_fenetre_active: isActiveStay(b),
+      codes_autorises: String(b.status || '').toLowerCase() === 'confirmed' && isActiveStay(b)
     });
   } catch (err) { res.json({ error: err.message }); }
 });
@@ -1531,7 +1739,7 @@ app.post('/api/chat', async (req, res) => {
     let roomInfo = null;
     if (guestName || guestPhone || guestEmail) {
       activeBooking = await verifyGuestIdentity({ name: guestName, phone: guestPhone, email: guestEmail });
-      if (activeBooking && propInfo) roomInfo = propInfo.rooms.find(r => r.id === activeBooking.roomId) || null;
+      if (activeBooking && propInfo) roomInfo = propInfo.rooms.find(r => String(r.id) === String(activeBooking.roomId)) || null;
     }
 
     const bookingCount = await countGuestBookings(activeBooking?.email || null);
@@ -1568,6 +1776,7 @@ app.post('/api/chat', async (req, res) => {
     const raw = await runConversation({ system: systemPromptText, messages });
     const parsed = raw ? parseAlert(raw, messages[messages.length - 1].content) : null;
     if (!parsed || !parsed.reply) return res.status(502).json({ error: 'Service momentanément indisponible' });
+    parsed.reply = applyAddressPolicy(parsed.reply, false); // jamais l'adresse exacte sur le chat web
 
     notifyOwner({
       channel: 'Chat web', contact: 'visiteur du site',
@@ -1592,7 +1801,7 @@ app.post('/api/chat', async (req, res) => {
 module.exports = {
   app, isPureCourtesy, parseAlert, fallbackCategory, phoneKey, normalizeWaNumber,
   webIdentityScore, waIdentityScore, sanitizeChatMessages, buildSystemPrompt, executeTool, calendarHint,
-  bookingFormatRules
+  bookingFormatRules, applyAddressPolicy, isActiveStay, stayDatesMatch, extractUnits
 };
 
 if (require.main === module) {
