@@ -13,7 +13,8 @@
  * - CORS_ORIGIN (optionnel) liste d'origines autorisées pour /api/chat, séparées par des virgules
  *
  * COMMANDES PROPRIÉTAIRE (à envoyer au numéro du bot depuis OWNER_PHONE)
- * /pause [numéro] [heures] /reprise [numéro] /statut /aide
+ * /pause [numéro|bIDRÉSERVATION] [heures] /reprise [numéro|bIDRÉSERVATION] /statut /aide
+ * (bIDRÉSERVATION = réservation Airbnb/Booking via Beds24, ex. /pause b95878640)
  */
 
 const express = require('express');
@@ -47,13 +48,13 @@ if (!process.env.WHATSAPP_APP_SECRET) console.warn('⚠️ WHATSAPP_APP_SECRET n
 // Tout ce qui est vide est simplement omis du prompt. Ce qui n'est pas écrit ici reste "inconnu" pour l'agent.
 
 // Fonctionnement de la serrure / du digicode (ex : "Taper le code puis appuyer sur la touche ... et tourner la poignée.")
-const LOCK_INSTRUCTIONS = `Taper le code envoyé C----- puis tourner la poignée presque qu'à 90°.`;
+const LOCK_INSTRUCTIONS = ``;
 
 // Fiche par logement (ex : "- Logement 1 (Agate) : accès au patio : oui ; vaisselle : assiettes, couverts, casseroles ; plaques de cuisson : non")
 const UNIT_SHEET = ``;
 
-// Politique pour les longs séjours (32 nuits ou plus)
-const LONG_STAY_POLICY = `Séjour de 32 nuits ou plus : ne promets AUCUN tarif ni remise. Donne la disponibilité vérifiée, puis dis que tu transmets la demande au propriétaire, qui reviendra vers le voyageur avec une proposition personnalisée.`;
+// Politique pour les longs séjours (28 nuits ou plus)
+const LONG_STAY_POLICY = `Séjour de 28 nuits ou plus : ne promets AUCUN tarif ni remise. Donne la disponibilité vérifiée, puis dis que tu transmets la demande au propriétaire, qui reviendra vers le voyageur avec une proposition personnalisée.`;
 
 // ==================== PROMPTS ====================
 
@@ -98,8 +99,8 @@ ADRESSE : 11 rue de l'Industrie, 02100 Saint-Quentin
 - 1 grande poubelle dans le patio
 - Poubelle dans le logement pour les ordures courantes
 
-=== VÉLOS et TROTINNETTES ===
-- Les vélos et trotinnettes sont INTERDITS dans les couloirs de l'immeuble
+=== VÉLOS ===
+- Les vélos sont INTERDITS dans les couloirs de l'immeuble
 
 === CONSIGNES D'UTILISATION ===
 - Liseuses/lampes de chevet : appui long sur ON/OFF pour changer la couleur (3 niveaux), appui court pour changer l'intensité (9 niveaux)
@@ -428,11 +429,6 @@ async function getAllActiveBookings() {
   }
 }
 
-async function getBookingByRoomId(roomId) {
-  const bookings = await getAllActiveBookings();
-  return bookings.find(b => b.roomId === roomId) || null;
-}
-
 // ---------- Vérification d'identité ----------
 // Règle : 2 critères sur 3 (nom, téléphone, email), comparaison EXACTE (plus de sous-chaînes).
 
@@ -681,7 +677,17 @@ async function executeTool(name, input) {
 
 // ==================== PROMPT ====================
 
-function buildSystemPrompt({ propInfo = null, roomInfo = null, booking = null, isLoyal = false, channel = 'platform', linksSent = false } = {}) {
+// Règles selon la plateforme réelle de la réservation (Beds24 : Airbnb / Booking / inconnue)
+function platformRules(platform) {
+  if (platform === 'airbnb') return `=== PLATEFORME : AIRBNB ===
+Le voyageur t'écrit via Airbnb. Le tarif d'arrivée anticipée / départ tardif et le paiement à l'avance (Airbnb) s'appliquent. Pour les liens de réservation, ne donne que les liens Airbnb.`;
+  if (platform === 'booking') return `=== PLATEFORME : BOOKING ===
+Le voyageur t'écrit via Booking. Le tarif Airbnb d'arrivée anticipée / départ tardif ne s'applique PAS : dis que le tarif est à convenir avec le propriétaire et utilise la balise demande_horaire. Pour les liens de réservation, ne donne que le lien Booking.`;
+  return `=== PLATEFORME : NON DÉTERMINÉE ===
+Tu ne sais pas si le voyageur écrit via Airbnb ou Booking. Pour une arrivée anticipée ou un départ tardif, ne cite AUCUN tarif : transmets la demande au propriétaire (balise demande_horaire). Ne donne de liens de réservation que si le voyageur les demande.`;
+}
+
+function buildSystemPrompt({ propInfo = null, roomInfo = null, booking = null, isLoyal = false, channel = 'platform', linksSent = false, platform = null } = {}) {
   const wa = channel === 'whatsapp';
   const hasBooking = !!booking && !!propInfo;
 
@@ -705,6 +711,8 @@ function buildSystemPrompt({ propInfo = null, roomInfo = null, booking = null, i
 
   if (LOCK_INSTRUCTIONS.trim()) prompt += `\n\n=== SERRURE / DIGICODE (fonctionnement) ===\n${LOCK_INSTRUCTIONS.trim()}`;
   if (UNIT_SHEET.trim()) prompt += `\n\n=== FICHE PAR LOGEMENT ===\n${UNIT_SHEET.trim()}\nTout ce qui n'est écrit dans aucune section de ce document est INCONNU : ne l'invente pas.`;
+
+  if (platform) prompt += `\n\n${platformRules(platform)}`;
 
   prompt += `\n\n${fill(ESCALATION_RULES, '{LONG_STAY_POLICY}', LONG_STAY_POLICY)}`;
 
@@ -763,14 +771,14 @@ function parseAlert(raw, userText) {
   return { reply, category };
 }
 
-// Dernier numéro WhatsApp signalé au propriétaire (pour /pause sans argument)
+// Dernière conversation signalée au propriétaire : numéro WhatsApp, ou "b<id>" pour une réservation Beds24 (pour /pause sans argument)
 let lastNotified = null;
 
 function getOwnerNumber() {
   return normalizeWaNumber(process.env.OWNER_PHONE || '');
 }
 
-async function notifyOwner({ channel, contact, question, reply, category = 'aucune', booking = null }) {
+async function notifyOwner({ channel, contact, question, reply, category = 'aucune', booking = null, bookingId = null }) {
   try {
     const meta = ALERT_META[category];
     if (!meta && process.env.NOTIFY_ALL !== 'true') return;
@@ -787,6 +795,9 @@ async function notifyOwner({ channel, contact, question, reply, category = 'aucu
     if (channel === 'WhatsApp') {
       lastNotified = contactDigits;
       msg += `\n\nPour couper le bot sur cette conversation : /pause ${contactDigits}`;
+    } else if (String(channel).startsWith('Beds24') && bookingId) {
+      lastNotified = `b${bookingId}`;
+      msg += `\n\nPour couper le bot sur cette réservation : /pause b${bookingId}`;
     }
     await sendWhatsAppReply(owner, msg.substring(0, 4000));
   } catch (err) {
@@ -830,7 +841,7 @@ function addToHistory(phone, userText, assistantText) {
 }
 
 // Pause du bot (le propriétaire reprend la main)
-const pauses = new Map(); // numéro -> timestamp de fin
+const pauses = new Map(); // numéro WhatsApp ou "b<id réservation>" -> timestamp de fin
 function pauseConversation(key, hours) { pauses.set(key, Date.now() + hours * 3600 * 1000); }
 function resumeConversation(key) { pauses.delete(key); }
 function isPaused(key) {
@@ -987,32 +998,37 @@ async function sendWhatsAppReply(to, message) {
   }
 }
 
+function pauseLabel(key) {
+  return String(key).startsWith('b') ? `la réservation ${String(key).slice(1)}` : `+${key}`;
+}
+
 async function handleOwnerCommand(text) {
   const owner = getOwnerNumber();
   const say = m => sendWhatsAppReply(owner, m);
   const [cmdRaw, ...args] = text.trim().split(/\s+/);
   const cmd = cmdRaw.toLowerCase();
-  const numArg = args.find(a => a.replace(/\D/g, '').length >= 9);
-  const target = numArg ? normalizeWaNumber(numArg) : lastNotified;
-  const hoursArg = args.find(a => a !== numArg && /^\d{1,3}h?$/i.test(a));
+  const bArg = args.find(a => /^b\d{4,}$/i.test(a));
+  const numArg = args.find(a => a !== bArg && a.replace(/\D/g, '').length >= 9);
+  const target = bArg ? bArg.toLowerCase() : (numArg ? normalizeWaNumber(numArg) : lastNotified);
+  const hoursArg = args.find(a => a !== numArg && a !== bArg && /^\d{1,3}h?$/i.test(a));
   const hours = hoursArg ? parseInt(hoursArg, 10) : PAUSE_HOURS;
 
   if (cmd === '/pause') {
-    if (!target) return say('Précisez le numéro : /pause 336XXXXXXXX [heures]');
+    if (!target) return say('Précisez le numéro : /pause 336XXXXXXXX [heures] (ou /pause b95878640 pour une réservation Airbnb/Booking)');
     pauseConversation(target, hours);
-    return say(`⏸️ Bot en pause pour +${target} pendant ${hours} h.\nPour reprendre : /reprise ${target}`);
+    return say(`⏸️ Bot en pause pour ${pauseLabel(target)} pendant ${hours} h.\nPour reprendre : /reprise ${target}`);
   }
   if (cmd === '/reprise') {
-    if (!target) return say('Précisez le numéro : /reprise 336XXXXXXXX');
+    if (!target) return say('Précisez le numéro : /reprise 336XXXXXXXX (ou /reprise b95878640)');
     resumeConversation(target);
-    return say(`▶️ Bot réactivé pour +${target}.`);
+    return say(`▶️ Bot réactivé pour ${pauseLabel(target)}.`);
   }
   if (cmd === '/statut') {
     const list = [...pauses.entries()].filter(([n]) => isPaused(n))
-      .map(([n, until]) => `- +${n} (jusqu'à ${new Date(until).toLocaleString('fr-FR', { timeZone: 'Europe/Paris' })})`);
+      .map(([n, until]) => `- ${pauseLabel(n)} (jusqu'à ${new Date(until).toLocaleString('fr-FR', { timeZone: 'Europe/Paris' })})`);
     return say(list.length ? `Conversations en pause :\n${list.join('\n')}` : 'Aucune conversation en pause.');
   }
-  return say('Commandes :\n/pause [numéro] [heures] : le bot se tait (sans numéro : dernière alerte)\n/reprise [numéro] : le bot reprend\n/statut : conversations en pause');
+  return say('Commandes :\n/pause [numéro ou bIDRÉSERVATION] [heures] : le bot se tait (sans argument : dernière alerte)\n/reprise [numéro ou bIDRÉSERVATION] : le bot reprend\n/statut : conversations en pause');
 }
 
 async function handleWhatsAppMessage(message) {
@@ -1130,6 +1146,144 @@ function messageBookingId(msg) {
   return msg.bookingId || msg.booking_id || msg.bookId || null;
 }
 
+function messageSource(msg) {
+  return msg.source || msg.type || '';
+}
+
+function messageText(msg) {
+  return String(msg.message || msg.text || '').trim();
+}
+
+// Séjour en cours ou qui commence dans moins de 24 h (même règle que pour WhatsApp)
+function isActiveWindow(b, now = new Date()) {
+  const tomorrow = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+  return new Date(b.arrival) <= tomorrow && new Date(b.departure) >= now;
+}
+
+// Plateforme d'origine de la réservation, d'après la fiche Beds24
+function detectPlatform(b) {
+  if (!b) return 'inconnue';
+  const raw = normalizeText([b.channel, b.apiSource, b.referer].filter(Boolean).join(' '));
+  if (/airbnb/.test(raw)) return 'airbnb';
+  if (/booking/.test(raw)) return 'booking';
+  return 'inconnue';
+}
+
+// Réservation retrouvée par son numéro (celui du message), quelles que soient les dates
+const bookingByIdCache = new Map();
+async function getBookingById(id) {
+  const key = String(id);
+  const hit = bookingByIdCache.get(key);
+  if (hit && Date.now() - hit.at < 60000) return hit.data;
+  try {
+    const token = await getBeds24Token();
+    if (!token) return null;
+    const response = await fetchT(`https://beds24.com/api/v2/bookings?id=${encodeURIComponent(key)}`, { headers: { 'token': token } });
+    if (!response.ok) { console.error('Erreur réservation Beds24:', response.status); return null; }
+    const raw = await response.json();
+    const list = raw?.data || raw;
+    const b = Array.isArray(list) ? list.find(x => String(x.id) === key) || null : null;
+    bookingByIdCache.set(key, { at: Date.now(), data: b });
+    return b;
+  } catch (err) {
+    console.error('Erreur getBookingById:', err.message);
+    return null;
+  }
+}
+
+// Messages consécutifs du même auteur fusionnés en un seul
+function mergeRoles(msgs) {
+  const out = [];
+  for (const m of msgs) {
+    const last = out[out.length - 1];
+    if (last && last.role === m.role) last.content += '\n' + m.content;
+    else out.push({ role: m.role, content: m.content });
+  }
+  return out;
+}
+
+// Fil de discussion d'une réservation (voyageur = user, hôte = assistant), avant l'instant "before"
+function buildBeds24History(all, bookingId, before) {
+  const rows = all
+    .filter(m => String(messageBookingId(m)) === String(bookingId) && m.time && new Date(m.time) < before && messageText(m))
+    .sort((a, b) => new Date(a.time) - new Date(b.time))
+    .map(m => ({ role: messageSource(m) === 'guest' ? 'user' : 'assistant', content: messageText(m).slice(0, 1500) }));
+  const merged = mergeRoles(rows).slice(-10);
+  while (merged.length && merged[0].role !== 'user') merged.shift();
+  return merged;
+}
+
+// Répond à un ou plusieurs messages consécutifs d'un même voyageur (une seule réponse)
+async function handleBeds24Group(token, propInfo, bookingId, group, all) {
+  const timeOf = m => new Date(m.time);
+  group.sort((a, b) => timeOf(a) - timeOf(b));
+  const ids = group.map(m => m.id || m.messageId);
+  const markDone = () => ids.forEach(id => processedMessages.add(id));
+  const combined = group.map(messageText).join('\n');
+  const attemptKey = String(ids[ids.length - 1]);
+
+  console.log(`\n📨 Beds24 | réservation ${bookingId} | ${group.length} message(s) | ${combined.substring(0, 100)}`);
+
+  // Le propriétaire a coupé le bot sur cette réservation (/pause bID)
+  if (isPaused(`b${bookingId}`)) {
+    console.log(`⏸️ Réservation ${bookingId} en pause, pas de réponse`);
+    markDone();
+    return;
+  }
+
+  const history = buildBeds24History(all, bookingId, timeOf(group[0]));
+  const lastEntry = history[history.length - 1];
+  const lastAssistant = lastEntry ? (lastEntry.role === 'assistant' ? lastEntry.content : '') : null;
+
+  // Simple politesse : une réponse brève, une seule fois par période
+  if (isPureCourtesy(combined, lastAssistant)) {
+    markDone();
+    if (Date.now() - (courtesyAt.get(String(bookingId)) || 0) < COURTESY_WINDOW_MS) {
+      console.log('🙏 Politesse déjà acquittée, pas de réponse');
+      return;
+    }
+    const thanks = await generateCourtesyReply(combined, history);
+    if (thanks && await sendBeds24Message(token, bookingId, thanks)) courtesyAt.set(String(bookingId), Date.now());
+    return;
+  }
+
+  // Réservation retrouvée par son numéro : plus de confusion possible entre deux voyageurs du même logement
+  const booking = await getBookingById(bookingId);
+  const confirmed = booking && String(booking.status || '').toLowerCase() === 'confirmed';
+  const activeBooking = confirmed && isActiveWindow(booking) ? booking : null;
+  const platform = detectPlatform(booking);
+  const roomInfo = activeBooking && propInfo ? propInfo.rooms.find(r => String(r.id) === String(activeBooking.roomId)) || null : null;
+  const isLoyal = (await countGuestBookings(booking?.email || null)) >= 3;
+  console.log(` Réservation: ${booking ? `${booking.firstName} ${booking.lastName}` : 'introuvable'} | codes autorisés: ${!!activeBooking} | plateforme: ${platform} (channel: ${booking?.channel ?? '-'}) | fidèle: ${isLoyal} | historique: ${history.length} message(s)`);
+
+  const systemPrompt = buildSystemPrompt({ propInfo, roomInfo, booking: activeBooking, isLoyal, channel: 'platform', platform });
+  const rawReply = await runConversation({ system: systemPrompt, messages: mergeRoles([...history, { role: 'user', content: combined }]) });
+  const parsed = rawReply ? parseAlert(rawReply, combined) : null;
+
+  let ok = false;
+  if (parsed && parsed.reply) {
+    console.log(` Réponse: ${parsed.reply.substring(0, 100)} | alerte: ${parsed.category}`);
+    ok = await sendBeds24Message(token, bookingId, parsed.reply);
+    if (ok) {
+      await notifyOwner({ channel: `Beds24 / ${platform}`, contact: `réservation ${bookingId}`, bookingId, question: combined, reply: parsed.reply, category: parsed.category, booking });
+    }
+  }
+
+  if (ok) {
+    markDone();
+  } else {
+    const n = (beds24Attempts.get(attemptKey) || 0) + 1;
+    beds24Attempts.set(attemptKey, n);
+    if (n >= 3) {
+      markDone();
+      console.error(` ❌ Réservation ${bookingId} abandonnée après ${n} tentatives`);
+      await notifyOwner({ channel: `Beds24 / ${platform}`, contact: `réservation ${bookingId}`, bookingId, question: combined, reply: '(aucune réponse envoyée)', category: 'erreur_ia', booking });
+    } else {
+      console.log(` ⚠️ Échec (tentative ${n}/3), nouvel essai au prochain passage`);
+    }
+  }
+}
+
 async function fetchAndReplyBeds24Messages() {
   if (polling) return; // évite deux passages en parallèle
   polling = true;
@@ -1147,78 +1301,34 @@ async function fetchAndReplyBeds24Messages() {
     }
 
     const raw = await response.json();
-    const messages = raw?.data || raw;
-    if (!Array.isArray(messages)) return;
+    const all = raw?.data || raw;
+    if (!Array.isArray(all)) return;
 
-    let newMessages = 0;
-    for (const msg of messages) {
+    // Nouveaux messages de voyageurs, regroupés par réservation
+    const groups = new Map();
+    for (const msg of all) {
       const msgId = msg.id || msg.messageId;
       if (!msgId || processedMessages.has(msgId)) continue;
-
-      const msgTime = msg.time ? new Date(msg.time) : null;
-      const messageText = msg.message || msg.text || '';
       // Ignorer : avant démarrage de l'agent, pas un message voyageur, ou vide
-      if (!msgTime || msgTime < AGENT_START_TIME || (msg.source || msg.type || '') !== 'guest' || !messageText.trim()) {
+      if (!msg.time || new Date(msg.time) < AGENT_START_TIME || messageSource(msg) !== 'guest' || !messageText(msg)) {
         processedMessages.add(msgId);
         continue;
       }
-
       const bookingId = messageBookingId(msg);
-
-      // Simple politesse : une réponse brève, une seule fois par période
-      if (isPureCourtesy(messageText, null)) {
+      if (!bookingId) {
+        console.error(` ⚠️ Message Beds24 ${msgId} sans numéro de réservation : ignoré`);
         processedMessages.add(msgId);
-        const key = String(bookingId || msg.roomId || '?');
-        if (Date.now() - (courtesyAt.get(key) || 0) < COURTESY_WINDOW_MS) {
-          console.log(`🙏 Beds24 ${msgId} : politesse déjà acquittée, pas de réponse`);
-          continue;
-        }
-        const thanks = await generateCourtesyReply(messageText);
-        if (thanks && bookingId && await sendBeds24Message(token, bookingId, thanks)) courtesyAt.set(key, Date.now());
         continue;
       }
-
-      newMessages++;
-      console.log(`\n📨 Nouveau message Beds24 | ID: ${msgId} | RoomID: ${msg.roomId}`);
-      console.log(` Texte: ${messageText.substring(0, 100)}`);
-
-      const activeBooking = msg.roomId ? await getBookingByRoomId(msg.roomId) : null;
-      let roomInfo = null;
-      if (propInfo && msg.roomId) roomInfo = propInfo.rooms.find(r => r.id === msg.roomId) || null;
-
-      const bookingCount = await countGuestBookings(activeBooking?.email || null);
-      const isLoyal = bookingCount >= 3;
-      console.log(` Réservation: ${activeBooking ? `${activeBooking.firstName} ${activeBooking.lastName}` : 'non trouvée'} | Fidèle: ${isLoyal}`);
-
-      const systemPrompt = buildSystemPrompt({ propInfo, roomInfo, booking: activeBooking, isLoyal, channel: 'platform' });
-      const rawReply = await generateAIReply(messageText, systemPrompt);
-      const parsed = rawReply ? parseAlert(rawReply, messageText) : null;
-
-      let ok = false;
-      if (parsed && parsed.reply) {
-        console.log(` Réponse: ${parsed.reply.substring(0, 100)} | alerte: ${parsed.category}`);
-        ok = await sendBeds24Reply(token, msg, parsed.reply);
-        if (ok) {
-          await notifyOwner({ channel: 'Beds24', contact: `réservation ${bookingId || '?'}`, bookingId, question: messageText, reply: parsed.reply, category: parsed.category, booking: activeBooking });
-        }
-      }
-
-      if (ok) {
-        processedMessages.add(msgId);
-      } else {
-        const n = (beds24Attempts.get(msgId) || 0) + 1;
-        beds24Attempts.set(msgId, n);
-        if (n >= 3) {
-          processedMessages.add(msgId);
-          console.error(` ❌ Message Beds24 ${msgId} abandonné après ${n} tentatives`);
-          await notifyOwner({ channel: 'Beds24', contact: `réservation ${bookingId || '?'}`, bookingId, question: messageText, reply: '(aucune réponse envoyée)', category: 'erreur_ia', booking: activeBooking });
-        } else {
-          console.log(` ⚠️ Échec (tentative ${n}/3), nouvel essai au prochain passage`);
-        }
-      }
+      const key = String(bookingId);
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(msg);
     }
 
-    if (newMessages > 0) console.log(`\n✅ ${newMessages} message(s) Beds24 examiné(s)`);
+    for (const [bookingId, group] of groups) {
+      await handleBeds24Group(token, propInfo, bookingId, group, all);
+    }
+    if (groups.size > 0) console.log(`\n✅ ${groups.size} conversation(s) Beds24 examinée(s)`);
   } catch (err) {
     console.error('Erreur polling Beds24:', err.message);
   } finally {
@@ -1241,10 +1351,6 @@ async function sendBeds24Message(token, bookingId, text) {
     console.error('Erreur envoi Beds24:', err.message);
     return false;
   }
-}
-
-async function sendBeds24Reply(token, originalMessage, replyText) {
-  return sendBeds24Message(token, messageBookingId(originalMessage), replyText);
 }
 
 // ==================== ROUTES ====================
@@ -1308,6 +1414,25 @@ app.get('/test-beds24-messages', requireAdmin, async (req, res) => {
           ignore_car_avant_demarrage: m.time ? new Date(m.time) < AGENT_START_TIME : true
         };
       })
+    });
+  } catch (err) { res.json({ error: err.message }); }
+});
+
+// Diagnostic : plateforme détectée et droits d'une réservation (lecture seule)
+app.get('/test-beds24-booking', requireAdmin, async (req, res) => {
+  try {
+    const id = String(req.query.id || '').replace(/\D/g, '');
+    if (!id) return res.json({ error: 'Ajoutez &id=NUMERO_RESERVATION (ex. 95878640)' });
+    bookingByIdCache.delete(id);
+    const b = await getBookingById(id);
+    if (!b) return res.json({ error: 'Réservation introuvable (ou Beds24 injoignable)' });
+    res.json({
+      champs_disponibles: Object.keys(b),
+      status: b.status, channel: b.channel ?? null, apiSource: b.apiSource ?? null, referer: b.referer ?? null,
+      arrivee: b.arrival, depart: b.departure, roomId: b.roomId,
+      plateforme_detectee: detectPlatform(b),
+      dans_la_fenetre_active: isActiveWindow(b),
+      codes_autorises: String(b.status || '').toLowerCase() === 'confirmed' && isActiveWindow(b)
     });
   } catch (err) { res.json({ error: err.message }); }
 });
