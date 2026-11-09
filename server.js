@@ -48,13 +48,13 @@ if (!process.env.WHATSAPP_APP_SECRET) console.warn('⚠️ WHATSAPP_APP_SECRET n
 // Tout ce qui est vide est simplement omis du prompt. Ce qui n'est pas écrit ici reste "inconnu" pour l'agent.
 
 // Fonctionnement de la serrure / du digicode (ex : "Taper le code puis appuyer sur la touche ... et tourner la poignée.")
-const LOCK_INSTRUCTIONS = ``;
+const LOCK_INSTRUCTIONS = `Taper le code envoyé (Cxxxx) puis tourner la poignée presque jusqu'à 90°.`;
 
 // Fiche par logement (ex : "- Logement 1 (Agate) : accès au patio : oui ; vaisselle : assiettes, couverts, casseroles ; plaques de cuisson : non")
 const UNIT_SHEET = ``;
 
-// Politique pour les longs séjours (28 nuits ou plus)
-const LONG_STAY_POLICY = `Séjour de 28 nuits ou plus : ne promets AUCUN tarif ni remise. Donne la disponibilité vérifiée, puis dis que tu transmets la demande au propriétaire, qui reviendra vers le voyageur avec une proposition personnalisée.`;
+// Politique pour les longs séjours (32 nuits ou plus)
+const LONG_STAY_POLICY = `Séjour de 32 nuits ou plus : ne promets AUCUN tarif ni remise. Donne la disponibilité vérifiée, puis dis que tu transmets la demande au propriétaire, qui reviendra vers le voyageur avec une proposition personnalisée.`;
 
 // ==================== PROMPTS ====================
 
@@ -179,7 +179,7 @@ Tu peux écrire "je transmets immédiatement votre message au propriétaire" UNI
 [[ALERTE:plainte]] : bruit, voisin, propreté, comportement d'autres occupants
 [[ALERTE:contact_humain]] : le voyageur veut parler au propriétaire ou à un humain
 [[ALERTE:demande_horaire]] : arrivée anticipée ou départ tardif demandé par un voyageur qui a une réservation
-[[ALERTE:long_sejour]] : séjour de 28 nuits ou plus, ou demande de tarif / remise
+[[ALERTE:long_sejour]] : séjour de 32 nuits ou plus, ou demande de tarif / remise
 [[ALERTE:aucune]] : tout le reste (simples informations, questions courantes, remerciements)
 
 Conduite selon la balise :
@@ -1342,7 +1342,7 @@ async function sendBeds24Message(token, bookingId, text) {
     const response = await fetchT('https://beds24.com/api/v2/bookings/messages', {
       method: 'POST',
       headers: { 'token': token, 'Content-Type': 'application/json' },
-      body: JSON.stringify([{ bookingId: Number(bookingId) || bookingId, message: text, source: 'host' }])
+      body: JSON.stringify([{ bookingId: Number(bookingId) || bookingId, message: text }])
     });
     console.log('✅ Message Beds24 envoyé | booking:', bookingId, '| status:', response.status);
     if (!response.ok) console.error('Détail erreur Beds24:', (await response.text()).substring(0, 300));
