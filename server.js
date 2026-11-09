@@ -98,8 +98,8 @@ ADRESSE : 11 rue de l'Industrie, 02100 Saint-Quentin
 - 1 grande poubelle dans le patio
 - Poubelle dans le logement pour les ordures courantes
 
-=== VÉLOS ===
-- Les vélos sont INTERDITS dans les couloirs de l'immeuble
+=== VÉLOS et TROTINNETTES ===
+- Les vélos et trotinnettes sont INTERDITS dans les couloirs de l'immeuble
 
 === CONSIGNES D'UTILISATION ===
 - Liseuses/lampes de chevet : appui long sur ON/OFF pour changer la couleur (3 niveaux), appui court pour changer l'intensité (9 niveaux)
