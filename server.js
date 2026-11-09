@@ -1158,7 +1158,7 @@ async function fetchAndReplyBeds24Messages() {
       const msgTime = msg.time ? new Date(msg.time) : null;
       const messageText = msg.message || msg.text || '';
       // Ignorer : avant démarrage de l'agent, pas un message voyageur, ou vide
-      if (!msgTime || msgTime < AGENT_START_TIME || (msg.type || '') !== 'guest' || !messageText.trim()) {
+      if (!msgTime || msgTime < AGENT_START_TIME || (msg.source || msg.type || '') !== 'guest' || !messageText.trim()) {
         processedMessages.add(msgId);
         continue;
       }
@@ -1232,7 +1232,7 @@ async function sendBeds24Message(token, bookingId, text) {
     const response = await fetchT('https://beds24.com/api/v2/bookings/messages', {
       method: 'POST',
       headers: { 'token': token, 'Content-Type': 'application/json' },
-      body: JSON.stringify([{ bookingId: Number(bookingId) || bookingId, message: text, type: 'host' }])
+      body: JSON.stringify([{ bookingId: Number(bookingId) || bookingId, message: text, source: 'host' }])
     });
     console.log('✅ Message Beds24 envoyé | booking:', bookingId, '| status:', response.status);
     if (!response.ok) console.error('Détail erreur Beds24:', (await response.text()).substring(0, 300));
@@ -1300,8 +1300,9 @@ app.get('/test-beds24-messages', requireAdmin, async (req, res) => {
       messages: list.map(m => {
         const id = m.id || m.messageId;
         return {
-          id, bookingId: messageBookingId(m), roomId: m.roomId, type: m.type, time: m.time,
-          source: m.source || m.channel || null,
+          id, bookingId: messageBookingId(m), roomId: m.roomId, time: m.time,
+          source: m.source || m.type || null,
+          lu_comme_message_voyageur: (m.source || m.type || '') === 'guest',
           texte: String(m.message || m.text || '').slice(0, 80),
           deja_traite: processedMessages.has(id),
           ignore_car_avant_demarrage: m.time ? new Date(m.time) < AGENT_START_TIME : true
