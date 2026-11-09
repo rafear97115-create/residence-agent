@@ -46,13 +46,13 @@ if (!process.env.WHATSAPP_APP_SECRET) console.warn('⚠️ WHATSAPP_APP_SECRET n
 // Tout ce qui est vide est simplement omis du prompt. Ce qui n'est pas écrit ici reste "inconnu" pour l'agent.
 
 // Fonctionnement de la serrure / du digicode (ex : "Taper le code puis appuyer sur la touche ... et tourner la poignée.")
-const LOCK_INSTRUCTIONS = ``;
+const LOCK_INSTRUCTIONS = `Taper le code envoyé C----- puis tourner la poignée presque qu'à 90°.`;
 
 // Fiche par logement (ex : "- Logement 1 (Agate) : accès au patio : oui ; vaisselle : assiettes, couverts, casseroles ; plaques de cuisson : non")
 const UNIT_SHEET = ``;
 
-// Politique pour les longs séjours (28 nuits ou plus)
-const LONG_STAY_POLICY = `Séjour de 28 nuits ou plus : ne promets AUCUN tarif ni remise. Donne la disponibilité vérifiée, puis dis que tu transmets la demande au propriétaire, qui reviendra vers le voyageur avec une proposition personnalisée.`;
+// Politique pour les longs séjours (32 nuits ou plus)
+const LONG_STAY_POLICY = `Séjour de 32 nuits ou plus : ne promets AUCUN tarif ni remise. Donne la disponibilité vérifiée, puis dis que tu transmets la demande au propriétaire, qui reviendra vers le voyageur avec une proposition personnalisée.`;
 
 // ==================== PROMPTS ====================
 
