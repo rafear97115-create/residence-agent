@@ -13,6 +13,8 @@
  * - CORS_ORIGIN (optionnel) liste d'origines autorisées pour /api/chat, séparées par des virgules
  * - STAY_VERIFICATION=off (optionnel) désactive la vérification "nom + dates + logement" sur WhatsApp
  * (par défaut : un voyageur est vérifié s'il donne son nom ET les dates exactes de son séjour ET son logement)
+ * - ROOM_MAP (optionnel) JSON qui associe l'ID Beds24 de chaque logement à son numéro, ex. {"123456":1,"123457":2}
+ * (utile si les logements ne s'appellent pas Agate, Bégonia... dans Beds24 ; voir /test-verification)
  *
  * COMMANDES PROPRIÉTAIRE (à envoyer au numéro du bot depuis OWNER_PHONE)
  * /pause [numéro|bIDRÉSERVATION] [heures] /reprise [numéro|bIDRÉSERVATION] /statut /aide
@@ -227,6 +229,7 @@ Si demande de codes : "Ces informations sont envoyées automatiquement avant vot
 
 const RULES_WITHOUT_BOOKING_WHATSAPP = `Ce numéro WhatsApp n'est pas (encore) rattaché à une réservation vérifiée.
 NE PAS communiquer : digicode, codes boîtes à clé, mot de passe Wi-Fi, numéro d'urgence, adresse exacte.
+STATUT : voyageur NON vérifié à cet instant. Le système a déjà analysé tout ce que le voyageur a écrit, y compris son dernier message. Ne dis JAMAIS que la vérification est "en cours" ou "se fait automatiquement" : le résultat est déjà connu. Si le voyageur a déjà donné son nom, ses dates et son logement, dis tout de suite que tu ne parviens pas à confirmer son identité automatiquement.
 Si le voyageur demande un code, dit qu'il est bloqué ou affirme avoir une réservation :
 - Demande-lui en UN SEUL message : son nom de famille ET son prénom tels qu'ils figurent sur la réservation, les dates du séjour (arrivée et départ) et le numéro du logement. L'adresse email de la réservation est une alternative, s'il la connaît.
 - Le système vérifie automatiquement dès que ces informations sont écrites dans la conversation : tu ne vérifies rien toi-même. Ne dis JAMAIS si une réservation existe ou non à tel nom, et ne répète jamais le nom, l'email ou les dates comme "introuvables" ou "non reconnus".
@@ -534,6 +537,21 @@ async function verifyGuestIdentity(provided) {
   return null;
 }
 
+// Numéro de logement (1 à 5) de chaque logement Beds24 : d'abord ROOM_MAP (réglage manuel), puis le nom (Agate, Bégonia...)
+let ROOM_MAP = {};
+try { ROOM_MAP = JSON.parse(process.env.ROOM_MAP || '{}'); } catch (e) { console.warn('⚠️ ROOM_MAP invalide (JSON attendu) : ignoré'); }
+
+function buildRoomNumbers(propInfo) {
+  const map = new Map();
+  for (const r of (propInfo?.rooms || [])) {
+    const n = normalizeText(r.name);
+    const l = AIRBNB_LINKS.find(x => x.mots.some(m => n.includes(m)));
+    if (l) map.set(String(r.id), l.num);
+  }
+  for (const [id, num] of Object.entries(ROOM_MAP)) if (Number(num)) map.set(String(id), Number(num));
+  return map;
+}
+
 // WhatsApp : le numéro expéditeur est authentique (Meta), le reste vient de la conversation
 const EMAIL_RE = /[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/gi;
 const PHONE_RE = /(?:\+|00)?\d[\d .-]{7,}\d/g;
@@ -571,9 +589,11 @@ function waIdentityScore(b, ctx) {
   if (bk && (bk === ctx.fromKey || (ctx.typedPhoneKeys || []).includes(bk))) { score++; reasons.push('téléphone'); }
   if (b.email && (ctx.emails || []).includes(String(b.email).toLowerCase().trim())) { score++; reasons.push('email'); }
   if (waNameMatches(b, ctx.words)) { score++; reasons.push('nom'); }
-  if (STAY_VERIFICATION && ctx.text && ctx.units && ctx.roomNumbers) {
-    const unit = ctx.roomNumbers.get(String(b.roomId));
-    if (unit && ctx.units.has(unit) && stayDatesMatch(b, ctx.text)) { score++; reasons.push('séjour'); }
+  if (STAY_VERIFICATION && ctx.text && ctx.units && stayDatesMatch(b, ctx.text)) {
+    // Si on connaît le numéro de ce logement, le voyageur doit citer le bon.
+    // Sinon (nom Beds24 du type "Charmant studio...", sans "Agate"), il doit au moins avoir cité un logement.
+    const unit = ctx.roomNumbers ? ctx.roomNumbers.get(String(b.roomId)) : null;
+    if (unit ? ctx.units.has(unit) : ctx.units.size > 0) { score++; reasons.push('séjour'); }
   }
   return { score, reasons };
 }
@@ -601,12 +621,7 @@ async function identifyWhatsAppGuest(from, history, text) {
     // Tout ce que le voyageur a écrit depuis le début (l'historique de 10 messages ne suffit pas : il oublie le début)
     const joined = [conv.identityText || '', ...history.filter(m => m.role === 'user').map(m => m.content), text].join(' \n ');
     const normJoined = normalizeText(joined);
-    const roomNumbers = new Map();
-    for (const r of (propInfo?.rooms || [])) {
-      const n = normalizeText(r.name);
-      const l = AIRBNB_LINKS.find(x => x.mots.some(m => n.includes(m)));
-      if (l) roomNumbers.set(String(r.id), l.num);
-    }
+    const roomNumbers = buildRoomNumbers(propInfo);
     const ctx = {
       fromKey: phoneKey(from),
       typedPhoneKeys: (joined.match(PHONE_RE) || []).map(phoneKey).filter(Boolean),
@@ -1641,6 +1656,30 @@ app.get('/test-beds24-booking', requireAdmin, async (req, res) => {
       plateforme_detectee: detectPlatform(b),
       dans_la_fenetre_active: isActiveStay(b),
       codes_autorises: String(b.status || '').toLowerCase() === 'confirmed' && isActiveStay(b)
+    });
+  } catch (err) { res.json({ error: err.message }); }
+});
+
+// Diagnostic : pourquoi un voyageur est (ou n'est pas) vérifié. Ex : /test-verification?id=95878640&text=Fatima Karim du 9 au 12 logement 1
+app.get('/test-verification', requireAdmin, async (req, res) => {
+  try {
+    const id = String(req.query.id || '').replace(/\D/g, '');
+    if (!id) return res.json({ error: 'Ajoutez ?id=NUMERO_RESERVATION&text=Fatima Karim du 9 au 12 logement 1' });
+    bookingByIdCache.delete(id);
+    const b = await getBookingById(id);
+    if (!b) return res.json({ error: 'Réservation introuvable (ou Beds24 injoignable)' });
+    const propInfo = await getPropertyInfo();
+    const roomNumbers = buildRoomNumbers(propInfo);
+    const norm = normalizeText(String(req.query.text || ''));
+    const ctx = { fromKey: '', typedPhoneKeys: [], emails: [], words: new Set(norm.split(/[^a-z0-9]+/).filter(Boolean)), text: norm, units: extractUnits(norm), roomNumbers };
+    const r = waIdentityScore(b, ctx);
+    res.json({
+      prenom_beds24: b.firstName ?? null, nom_beds24: b.lastName ?? null,
+      roomId: b.roomId, unitId: b.unitId ?? null,
+      logement_reconnu: roomNumbers.get(String(b.roomId)) ?? null,
+      logements_beds24: (propInfo?.rooms || []).map(x => ({ id: x.id, nom: x.name, numero_reconnu: roomNumbers.get(String(x.id)) ?? null })),
+      sejour_actif: isActiveStay(b), email_present: !!b.email, telephone_present: !!(b.phone || b.mobile),
+      score: r.score, criteres: r.reasons, verifie: r.score >= 2
     });
   } catch (err) { res.json({ error: err.message }); }
 });
