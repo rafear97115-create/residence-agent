@@ -1823,6 +1823,34 @@ app.get('/debug-beds24-token', requireAdmin, async (req, res) => {
   } catch (err) { res.json({ error: err.message }); }
 });
 
+// Diagnostic : réservations récemment créées ou modifiées, tous statuts (demandes, demandes d'information, confirmées...).
+// Ex : /test-beds24-requests?hours=48  (lecture seule)
+app.get('/test-beds24-requests', requireAdmin, async (req, res) => {
+  try {
+    const token = await getBeds24Token();
+    if (!token) return res.json({ error: 'Beds24 déconnecté (token indisponible)' });
+    const hours = Math.min(Math.max(Number(req.query.hours) || 48, 1), 240);
+    const since = new Date(Date.now() - hours * 3600 * 1000).toISOString();
+    const r = await fetchT(`https://beds24.com/api/v2/bookings?modifiedFrom=${encodeURIComponent(since)}&maxResults=60`, { headers: { 'token': token } });
+    const raw = await r.json();
+    const list = raw?.data || raw;
+    if (!Array.isArray(list)) return res.json({ status: r.status, reponse_beds24: raw });
+    list.sort((a, b) => String(b.modifiedTime || b.bookingTime || '').localeCompare(String(a.modifiedTime || a.bookingTime || '')));
+    res.json({
+      status: r.status, depuis: since, nombre: list.length,
+      champs_disponibles: list[0] ? Object.keys(list[0]) : [],
+      reservations: list.map(b => ({
+        id: b.id, status: b.status, channel: b.channel ?? null, apiSource: b.apiSource ?? null,
+        arrivee: b.arrival, depart: b.departure, roomId: b.roomId,
+        nom: `${b.firstName || ''} ${b.lastName || ''}`.trim(),
+        creee: b.bookingTime ?? null, modifiee: b.modifiedTime ?? null,
+        commentaire_voyageur: String(b.comments || '').slice(0, 200),
+        notes: String(b.notes || '').slice(0, 100)
+      }))
+    });
+  } catch (err) { res.json({ error: err.message }); }
+});
+
 app.get('/test-templates', requireAdmin, async (req, res) => {
   try {
     const token = await getBeds24Token();
