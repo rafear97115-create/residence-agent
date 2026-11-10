@@ -11,19 +11,24 @@
  * - NOTIFY_ALL=true (optionnel) renvoie AUSSI les échanges ordinaires au propriétaire
  * - PAUSE_HOURS (optionnel, défaut 12) durée de la pause du bot
  * - CORS_ORIGIN (optionnel) liste d'origines autorisées pour /api/chat, séparées par des virgules
+ * - CATCHUP_HOURS (optionnel, défaut 12) : un message Airbnb/Booking reçu pendant que le bot dormait ou redémarrait
+ *   reçoit quand même une réponse s'il a moins de N heures et si personne n'y a répondu depuis
  * - STAY_VERIFICATION=off (optionnel) désactive la vérification "nom + dates + logement" sur WhatsApp
- * (par défaut : un voyageur est vérifié s'il donne son nom ET les dates exactes de son séjour ET son logement)
+ *   (par défaut : un voyageur est vérifié s'il donne son nom ET les dates exactes de son séjour ET son logement)
  * - ROOM_MAP (optionnel) JSON qui associe l'ID Beds24 de chaque logement à son numéro, ex. {"123456":1,"123457":2}
- * (utile si les logements ne s'appellent pas Agate, Bégonia... dans Beds24 ; voir /test-verification)
+ *   (utile si les logements ne s'appellent pas Agate, Bégonia... dans Beds24 ; voir /test-verification)
  *
  * COMMANDES PROPRIÉTAIRE (à envoyer au numéro du bot depuis OWNER_PHONE)
  * /pause [numéro|bIDRÉSERVATION] [heures] /reprise [numéro|bIDRÉSERVATION] /statut /aide
  * /valider bIDRÉSERVATION [numéro] : confirme à la main l'identité d'un voyageur WhatsApp
- * (le bot lui envoie alors directement ses informations d'accès)
+ *   (le bot lui envoie alors directement ses informations d'accès)
  * (bIDRÉSERVATION = réservation Beds24, ex. /pause b95878640)
  *
- * NOTE WhatsApp : les alertes au propriétaire sont des messages libres. Elles ne partent que si le propriétaire
- * a écrit au numéro du bot dans les dernières 24 h (règle de Meta). Écrivez-lui "ok" ou "/statut" chaque jour.
+ * ALERTES PROPRIÉTAIRE : le message libre WhatsApp ne part que si le propriétaire a écrit au bot dans les dernières 24 h
+ * (règle de Meta). Pour ne plus avoir à le faire, 2 secours automatiques (utilisés dans cet ordre si l'envoi échoue) :
+ * - WHATSAPP_ALERT_TEMPLATE nom d'un modèle WhatsApp approuvé (corps avec UNE variable {{1}}), autorisé hors fenêtre 24 h
+ * - WHATSAPP_ALERT_TEMPLATE_LANG (optionnel, défaut fr) langue du modèle
+ * - TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID (optionnels) alerte sur Telegram, sans aucune limite de 24 h
  */
 
 const express = require('express');
@@ -975,7 +980,7 @@ async function notifyOwner({ channel, contact, question, reply, category = 'aucu
     const meta = ALERT_META[category];
     if (!meta && process.env.NOTIFY_ALL !== 'true') return true;
     const owner = getOwnerNumber();
-    if (!owner) { console.warn('⚠️ OWNER_PHONE non défini : alerte non envoyée'); return false; }
+    if (!owner && !process.env.TELEGRAM_CHAT_ID) { console.warn('⚠️ OWNER_PHONE non défini : alerte non envoyée'); return false; }
     const contactDigits = String(contact).replace(/\D/g, '');
     if (channel === 'WhatsApp' && owner === contactDigits) return true; // inutile de se notifier soi-même
 
@@ -985,7 +990,7 @@ async function notifyOwner({ channel, contact, question, reply, category = 'aucu
     const cdKey = `${channel}|${contact}|${category}`;
     if (meta && Date.now() - (alertCooldown.get(cdKey) || 0) < ALERT_COOLDOWN_MS) {
       const line = `↪️ Suite ${channel === 'WhatsApp' ? '+' + contactDigits : contact} : « ${String(question).substring(0, 300)} »${booking ? '' : ' (non vérifié)'}`;
-      return await sendWhatsAppReply(owner, line);
+      return await sendOwnerAlert(line);
     }
 
     const who = booking
@@ -1008,7 +1013,7 @@ async function notifyOwner({ channel, contact, question, reply, category = 'aucu
           const propInfo = await getPropertyInfo();
           const lines = cands.map(b => {
             const room = propInfo?.rooms?.find(r => String(r.id) === String(b.roomId))?.name || b.roomId;
-            return `- ${b.firstName || ''} ${b.lastName || ''}, logement ${room}, du ${b.arrival} au ${b.departure}\n /valider b${b.id} ${contactDigits}`;
+            return `- ${b.firstName || ''} ${b.lastName || ''}, logement ${room}, du ${b.arrival} au ${b.departure}\n  /valider b${b.id} ${contactDigits}`;
           });
           msg += `\n\nRéservations possibles (envoyez la commande pour confirmer ce voyageur) :\n${lines.join('\n')}`;
         } else {
@@ -1020,7 +1025,7 @@ async function notifyOwner({ channel, contact, question, reply, category = 'aucu
       msg += `\n\nPour couper le bot sur cette réservation : /pause b${bookingId}`;
     }
 
-    const ok = await sendWhatsAppReply(owner, msg.substring(0, 4000));
+    const ok = await sendOwnerAlert(msg.substring(0, 4000));
     if (ok && meta) alertCooldown.set(cdKey, Date.now());
     return ok;
   } catch (err) {
@@ -1228,6 +1233,58 @@ async function sendWhatsAppReply(to, message) {
   }
 }
 
+// Modèle WhatsApp : une variable, sans retour à la ligne (règle de Meta), longueur limitée
+function flattenForTemplate(text) {
+  return String(text || '').replace(/\s*\n+\s*/g, ' | ').replace(/[\t ]{2,}/g, ' ').trim().substring(0, 900);
+}
+
+async function sendWhatsAppTemplate(to, name, lang, params) {
+  try {
+    const response = await fetchT(`https://graph.facebook.com/${WHATSAPP_API_VERSION}/${process.env.WHATSAPP_PHONE_ID}/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${process.env.WHATSAPP_TOKEN}` },
+      body: JSON.stringify({
+        messaging_product: 'whatsapp', to, type: 'template',
+        template: { name, language: { code: lang }, components: [{ type: 'body', parameters: params.map(t => ({ type: 'text', text: String(t) })) }] }
+      })
+    });
+    if (!response.ok) { console.error('Erreur modèle WhatsApp:', response.status, (await response.text()).substring(0, 300)); return false; }
+    console.log('✅ Alerte envoyée par modèle WhatsApp');
+    return true;
+  } catch (err) {
+    console.error('Erreur modèle WhatsApp:', err.message);
+    return false;
+  }
+}
+
+async function sendTelegram(text) {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  const chat = process.env.TELEGRAM_CHAT_ID;
+  if (!token || !chat) return false;
+  try {
+    const response = await fetchT(`https://api.telegram.org/bot${token}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: chat, text: String(text).substring(0, 4000) })
+    });
+    if (!response.ok) { console.error('Erreur Telegram:', response.status); return false; }
+    console.log('✅ Alerte envoyée sur Telegram');
+    return true;
+  } catch (err) {
+    console.error('Erreur Telegram:', err.message);
+    return false;
+  }
+}
+
+// Alerte au propriétaire : message libre WhatsApp, sinon modèle approuvé (hors fenêtre 24 h), sinon Telegram
+async function sendOwnerAlert(text) {
+  const owner = getOwnerNumber();
+  if (owner && await sendWhatsAppReply(owner, text)) return true;
+  const tpl = process.env.WHATSAPP_ALERT_TEMPLATE;
+  if (owner && tpl && await sendWhatsAppTemplate(owner, tpl, process.env.WHATSAPP_ALERT_TEMPLATE_LANG || 'fr', [flattenForTemplate(text)])) return true;
+  return sendTelegram(text);
+}
+
 function pauseLabel(key) {
   return String(key).startsWith('b') ? `la réservation ${String(key).slice(1)}` : `+${key}`;
 }
@@ -1403,6 +1460,19 @@ app.post('/webhook', async (req, res) => {
 
 const processedMessages = new Set();
 const beds24Attempts = new Map();
+
+// Rattrapage : un message reçu pendant que le bot dormait ou redémarrait n'est plus ignoré.
+// Il est traité s'il a moins de CATCHUP_HOURS heures ET si personne (propriétaire, message automatique) n'a répondu depuis.
+const CATCHUP_MS = (Number(process.env.CATCHUP_HOURS) || 12) * 3600 * 1000;
+
+function catchupDecision(msg, all, now = Date.now(), start = AGENT_START_TIME) {
+  const t = new Date(msg.time);
+  if (t >= start) return { catchup: false, answer: true };
+  if (now - t > CATCHUP_MS) return { catchup: true, answer: false };
+  const bid = String(messageBookingId(msg));
+  const answered = all.some(m => messageSource(m) !== 'guest' && String(messageBookingId(m)) === bid && m.time && new Date(m.time) > t);
+  return { catchup: true, answer: !answered };
+}
 let polling = false;
 
 function messageBookingId(msg) {
@@ -1495,6 +1565,7 @@ async function handleBeds24Group(token, propInfo, bookingId, group, all) {
   // Simple politesse : une réponse brève, une seule fois par période
   if (isPureCourtesy(combined, lastAssistant)) {
     markDone();
+    if (group.some(m => m._catchup)) { console.log('🙏 Politesse reçue pendant l\'arrêt : pas de réponse tardive'); return; }
     if (Date.now() - (courtesyAt.get(String(bookingId)) || 0) < COURTESY_WINDOW_MS) {
       console.log('🙏 Politesse déjà acquittée, pas de réponse');
       return;
@@ -1569,10 +1640,20 @@ async function fetchAndReplyBeds24Messages() {
     for (const msg of all) {
       const msgId = msg.id || msg.messageId;
       if (!msgId || processedMessages.has(msgId)) continue;
-      // Ignorer : avant démarrage de l'agent, pas un message voyageur, ou vide
-      if (!msg.time || new Date(msg.time) < AGENT_START_TIME || messageSource(msg) !== 'guest' || !messageText(msg)) {
+      // Ignorer : pas un message voyageur, ou vide
+      if (!msg.time || messageSource(msg) !== 'guest' || !messageText(msg)) {
         processedMessages.add(msgId);
         continue;
+      }
+      // Message antérieur au démarrage : rattrapé seulement s'il est récent et sans réponse
+      const dec = catchupDecision(msg, all);
+      if (!dec.answer) {
+        processedMessages.add(msgId);
+        continue;
+      }
+      if (dec.catchup) {
+        msg._catchup = true;
+        console.log(`📬 Rattrapage : message ${msgId} reçu à ${msg.time}, pendant l'arrêt du bot`);
       }
       const bookingId = messageBookingId(msg);
       if (!bookingId) {
@@ -1604,8 +1685,11 @@ async function sendBeds24Message(token, bookingId, text) {
       headers: { 'token': token, 'Content-Type': 'application/json' },
       body: JSON.stringify([{ bookingId: Number(bookingId) || bookingId, message: text }])
     });
-    console.log('✅ Message Beds24 envoyé | booking:', bookingId, '| status:', response.status);
-    if (!response.ok) console.error('Détail erreur Beds24:', (await response.text()).substring(0, 300));
+    console.log(response.ok ? '✅ Message Beds24 envoyé' : '❌ Message Beds24 REFUSÉ', '| booking:', bookingId, '| status:', response.status);
+    if (!response.ok) {
+      console.error('Détail erreur Beds24:', (await response.text()).substring(0, 300));
+      if (response.status === 401 || response.status === 403) console.error('👉 Le jeton Beds24 peut lire mais pas écrire les messages : vérifiez ses droits avec /debug-beds24-token');
+    }
     return response.ok;
   } catch (err) {
     console.error('Erreur envoi Beds24:', err.message);
@@ -1700,7 +1784,7 @@ app.get('/test-beds24-booking', requireAdmin, async (req, res) => {
   } catch (err) { res.json({ error: err.message }); }
 });
 
-// Diagnostic : pourquoi un voyageur est (ou n'est pas) vérifié. Ex : /test-verification?id=95878640&text=Fatima
+// Diagnostic : pourquoi un voyageur est (ou n'est pas) vérifié. Ex : /test-verification?id=95878640&text=Fatima Karim du 9 au 12 logement 1
 app.get('/test-verification', requireAdmin, async (req, res) => {
   try {
     const id = String(req.query.id || '').replace(/\D/g, '');
@@ -1721,6 +1805,21 @@ app.get('/test-verification', requireAdmin, async (req, res) => {
       sejour_actif: isActiveStay(b), email_present: !!b.email, telephone_present: !!(b.phone || b.mobile),
       score: r.score, criteres: r.reasons, verifie: r.score >= 2
     });
+  } catch (err) { res.json({ error: err.message }); }
+});
+
+// Diagnostic : droits (scopes) du jeton Beds24 actuel. Lecture seule, rien n'est envoyé, les valeurs de jeton sont masquées.
+app.get('/debug-beds24-token', requireAdmin, async (req, res) => {
+  try {
+    const token = await getBeds24Token();
+    if (!token) return res.json({ error: 'Beds24 déconnecté (token indisponible)' });
+    const r = await fetchT('https://beds24.com/api/v2/authentication/details', { headers: { 'token': token } }, 10000);
+    const txt = await r.text();
+    let body; try { body = JSON.parse(txt); } catch (e) { body = txt.substring(0, 500); }
+    const redact = o => Array.isArray(o) ? o.map(redact)
+      : (o && typeof o === 'object') ? Object.fromEntries(Object.entries(o).map(([k, v]) => [k, /token/i.test(k) && typeof v === 'string' ? '[masqué]' : redact(v)]))
+      : o;
+    res.json({ status: r.status, details: redact(body) });
   } catch (err) { res.json({ error: err.message }); }
 });
 
@@ -1881,7 +1980,7 @@ app.post('/api/chat', async (req, res) => {
 module.exports = {
   app, isPureCourtesy, parseAlert, fallbackCategory, phoneKey, normalizeWaNumber,
   webIdentityScore, waIdentityScore, sanitizeChatMessages, buildSystemPrompt, executeTool, calendarHint,
-  bookingFormatRules, applyAddressPolicy, isActiveStay, stayDatesMatch, extractUnits, hasIntro, ensureSignature, buildRoomNumbers
+  bookingFormatRules, applyAddressPolicy, isActiveStay, stayDatesMatch, extractUnits, hasIntro, ensureSignature, buildRoomNumbers, flattenForTemplate, catchupDecision
 };
 
 if (require.main === module) {
