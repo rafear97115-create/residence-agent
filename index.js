@@ -1685,8 +1685,11 @@ async function sendBeds24Message(token, bookingId, text) {
       headers: { 'token': token, 'Content-Type': 'application/json' },
       body: JSON.stringify([{ bookingId: Number(bookingId) || bookingId, message: text }])
     });
-    console.log('✅ Message Beds24 envoyé | booking:', bookingId, '| status:', response.status);
-    if (!response.ok) console.error('Détail erreur Beds24:', (await response.text()).substring(0, 300));
+    console.log(response.ok ? '✅ Message Beds24 envoyé' : '❌ Message Beds24 REFUSÉ', '| booking:', bookingId, '| status:', response.status);
+    if (!response.ok) {
+      console.error('Détail erreur Beds24:', (await response.text()).substring(0, 300));
+      if (response.status === 401 || response.status === 403) console.error('👉 Le jeton Beds24 peut lire mais pas écrire les messages : vérifiez ses droits avec /debug-beds24-token');
+    }
     return response.ok;
   } catch (err) {
     console.error('Erreur envoi Beds24:', err.message);
@@ -1802,6 +1805,21 @@ app.get('/test-verification', requireAdmin, async (req, res) => {
       sejour_actif: isActiveStay(b), email_present: !!b.email, telephone_present: !!(b.phone || b.mobile),
       score: r.score, criteres: r.reasons, verifie: r.score >= 2
     });
+  } catch (err) { res.json({ error: err.message }); }
+});
+
+// Diagnostic : droits (scopes) du jeton Beds24 actuel. Lecture seule, rien n'est envoyé, les valeurs de jeton sont masquées.
+app.get('/debug-beds24-token', requireAdmin, async (req, res) => {
+  try {
+    const token = await getBeds24Token();
+    if (!token) return res.json({ error: 'Beds24 déconnecté (token indisponible)' });
+    const r = await fetchT('https://beds24.com/api/v2/authentication/details', { headers: { 'token': token } }, 10000);
+    const txt = await r.text();
+    let body; try { body = JSON.parse(txt); } catch (e) { body = txt.substring(0, 500); }
+    const redact = o => Array.isArray(o) ? o.map(redact)
+      : (o && typeof o === 'object') ? Object.fromEntries(Object.entries(o).map(([k, v]) => [k, /token/i.test(k) && typeof v === 'string' ? '[masqué]' : redact(v)]))
+      : o;
+    res.json({ status: r.status, details: redact(body) });
   } catch (err) { res.json({ error: err.message }); }
 });
 
