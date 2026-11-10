@@ -975,6 +975,56 @@ const alertCooldown = new Map();
 const ALERT_COOLDOWN_MS = 10 * 60 * 1000;
 
 // Retourne true si le propriétaire a été joint (ou s'il n'y avait rien à envoyer), false si l'envoi a échoué
+// ----- Mise en forme des alertes propriétaire -----
+
+// "2026-11-09" -> "9/11/2026"
+function fmtDate(d) {
+  const m = String(d || '').match(/^(\d{4})-(\d{2})-(\d{2})/);
+  return m ? `${Number(m[3])}/${Number(m[2])}/${m[1]}` : String(d || '?');
+}
+
+function platformLabelFor(channel) {
+  const c = String(channel || '').toLowerCase();
+  if (c.includes('airbnb')) return 'Airbnb';
+  if (c.includes('booking')) return 'Booking';
+  if (c.includes('whatsapp')) return 'WhatsApp';
+  if (c.includes('chat')) return 'Chat web';
+  return 'Beds24';
+}
+
+// "3 Capucine" (numéro + nom), sinon le nom Beds24
+function describeRoom(roomId, propInfo) {
+  const num = buildRoomNumbers(propInfo).get(String(roomId));
+  const link = AIRBNB_LINKS.find(l => l.num === num);
+  if (num && link) return `${num} ${link.nom}`;
+  const name = propInfo?.rooms?.find(r => String(r.id) === String(roomId))?.name;
+  return name || String(roomId);
+}
+
+function formatOwnerAlert({ channel, contact, question, reply, category = 'aucune', booking = null, bookingId = null, profileName = null, locked = false }, propInfo) {
+  const meta = ALERT_META[category];
+  const isWa = channel === 'WhatsApp';
+  const digits = String(contact).replace(/\D/g, '');
+  const resId = (booking && booking.id) || bookingId || null;
+  const plat = platformLabelFor(channel);
+  const shortRef = isWa ? (resId ? `WhatsApp (${resId})` : `WhatsApp (+${digits})`) : (resId ? `${plat} (${resId})` : plat);
+
+  const headRef = (isWa && !resId) ? 'WhatsApp' : shortRef; // le numéro WhatsApp a sa propre ligne
+  let text = `${meta ? `${meta.icon} ${meta.label}` : '📱 Message'}\nPlate-forme${resId ? ' (réservation)' : ''} : ${headRef}`;
+  if (isWa) text += `\nTéléphone : +${digits}`;
+  if (booking) {
+    const nm = `${booking.firstName || ''} ${booking.lastName || ''}`.trim();
+    text += `\nVoyageur : ${nm || 'inconnu'}`;
+    text += `\nLogement : ${describeRoom(booking.roomId, propInfo)}`;
+    text += `\nSéjour : ${fmtDate(booking.arrival)} au ${fmtDate(booking.departure)}`;
+  } else {
+    text += `\nVoyageur : non vérifié${profileName ? ` (profil WhatsApp : ${profileName})` : ''}`;
+  }
+  if (locked) text += '\n🔒 Vérification automatique bloquée (trop d\'emails essayés)';
+  text += `\n\nMessage : ${String(question).substring(0, 800)}\n\nRéponse envoyée : ${String(reply).substring(0, 1200)}`;
+  return { shortRef, text };
+}
+
 async function notifyOwner({ channel, contact, question, reply, category = 'aucune', booking = null, bookingId = null, profileName = null, locked = false }) {
   try {
     const meta = ALERT_META[category];
@@ -987,21 +1037,16 @@ async function notifyOwner({ channel, contact, question, reply, category = 'aucu
     if (channel === 'WhatsApp') lastNotified = contactDigits;
     else if (String(channel).startsWith('Beds24') && bookingId) lastNotified = `b${bookingId}`;
 
+    const propInfo = await getPropertyInfo();
+    const fmt = formatOwnerAlert({ channel, contact, question, reply, category, booking, bookingId, profileName, locked }, propInfo);
+
     const cdKey = `${channel}|${contact}|${category}`;
     if (meta && Date.now() - (alertCooldown.get(cdKey) || 0) < ALERT_COOLDOWN_MS) {
-      const line = `↪️ Suite ${channel === 'WhatsApp' ? '+' + contactDigits : contact} : « ${String(question).substring(0, 300)} »${booking ? '' : ' (non vérifié)'}`;
+      const line = `↪️ Suite – ${fmt.shortRef} : « ${String(question).substring(0, 300)} »${booking ? '' : ' (non vérifié)'}`;
       return await sendOwnerAlert(line);
     }
 
-    const who = booking
-      ? `Voyageur vérifié : ${booking.firstName || ''} ${booking.lastName || ''} (logement ${booking.roomId}, du ${booking.arrival} au ${booking.departure})`
-      : 'Voyageur NON vérifié';
-    const head = meta ? `${meta.icon} ${meta.label}` : '📱 Message';
-    let msg = `${head}\nCanal : ${channel}\nDe : ${channel === 'WhatsApp' ? '+' + contactDigits : contact}`;
-    if (profileName) msg += `\nProfil WhatsApp : ${profileName}`;
-    msg += `\n${who}`;
-    if (locked) msg += '\n🔒 Vérification automatique bloquée (trop d\'emails essayés)';
-    msg += `\n\nMessage : ${String(question).substring(0, 800)}\n\nRéponse envoyée : ${String(reply).substring(0, 1200)}`;
+    let msg = fmt.text;
 
     if (channel === 'WhatsApp') {
       // Aide à la validation manuelle d'un voyageur bloqué dehors
@@ -2008,7 +2053,7 @@ app.post('/api/chat', async (req, res) => {
 module.exports = {
   app, isPureCourtesy, parseAlert, fallbackCategory, phoneKey, normalizeWaNumber,
   webIdentityScore, waIdentityScore, sanitizeChatMessages, buildSystemPrompt, executeTool, calendarHint,
-  bookingFormatRules, applyAddressPolicy, isActiveStay, stayDatesMatch, extractUnits, hasIntro, ensureSignature, buildRoomNumbers, flattenForTemplate, catchupDecision
+  bookingFormatRules, applyAddressPolicy, isActiveStay, stayDatesMatch, extractUnits, hasIntro, ensureSignature, buildRoomNumbers, flattenForTemplate, catchupDecision, formatOwnerAlert, fmtDate
 };
 
 if (require.main === module) {
