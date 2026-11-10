@@ -1700,7 +1700,7 @@ app.get('/test-beds24-booking', requireAdmin, async (req, res) => {
   } catch (err) { res.json({ error: err.message }); }
 });
 
-// Diagnostic : pourquoi un voyageur est (ou n'est pas) vérifié. Ex : /test-verification?id=95878640&text=Fatima Karim du 9 au 12 logement 1
+// Diagnostic : pourquoi un voyageur est (ou n'est pas) vérifié. Ex : /test-verification?id=95878640&text=Fatima
 app.get('/test-verification', requireAdmin, async (req, res) => {
   try {
     const id = String(req.query.id || '').replace(/\D/g, '');
