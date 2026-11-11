@@ -1,5 +1,5 @@
 /*
- * Agent concierge — Résidence de l'Industrie
+ * Assistant virtuel — Résidence de l'Industrie
  *
  * VARIABLES D'ENVIRONNEMENT (Render)
  * Existantes : ANTHROPIC_KEY, BEDS24_REFRESH_TOKEN, BEDS24_TOKEN, WHATSAPP_PHONE_ID,
@@ -356,6 +356,11 @@ function phoneKey(p) {
   return digits.length >= 9 ? digits.slice(-9) : '';
 }
 
+// Clés de comparaison des deux champs téléphone d'une réservation Beds24 (mobile et phone)
+function bookingPhoneKeys(b) {
+  return [b?.mobile, b?.phone].map(phoneKey).filter(Boolean);
+}
+
 // Numéro au format WhatsApp : indicatif pays, sans + ni espaces
 function normalizeWaNumber(s) {
   let n = String(s || '').replace(/\D/g, '');
@@ -555,8 +560,7 @@ function webIdentityScore(b, provided) {
   }
   if (provided.phone) {
     const pk = phoneKey(provided.phone);
-    const bk = phoneKey(b.phone || b.mobile || '');
-    if (pk && bk && pk === bk) { score++; reasons.push('téléphone'); }
+    if (pk && bookingPhoneKeys(b).includes(pk)) { score++; reasons.push('téléphone'); }
   }
   if (provided.email && b.email) {
     if (String(provided.email).toLowerCase().trim() === String(b.email).toLowerCase().trim()) {
@@ -604,16 +608,36 @@ function buildRoomNumbers(propInfo) {
 const EMAIL_RE = /[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/gi;
 const PHONE_RE = /(?:\+|00)?\d[\d .-]{7,}\d/g;
 
-// Dates "du 9 au 12" / "9/11 au 12/11" : jour d'arrivée puis jour de départ de la réservation
+// Dates "du 9 au 12" / "9/11 au 12/11" / "du 9 au 12 novembre" : jour d'arrivée puis jour de départ de la réservation.
+// Si le voyageur donne un mois (en chiffres ou en lettres), il doit correspondre ; sans mois, seuls les jours comptent.
+const MONTH_NAMES = ['janvier', 'fevrier', 'mars', 'avril', 'mai', 'juin', 'juillet', 'aout', 'septembre', 'octobre', 'novembre', 'decembre'];
+function monthIn(str) {
+  const t = String(str || '');
+  for (let i = 0; i < 12; i++) if (new RegExp(`\\b${MONTH_NAMES[i]}\\b`).test(t)) return i + 1;
+  return null;
+}
 function stayDatesMatch(b, normText) {
-  const a = String(b?.arrival || '').slice(8, 10);
-  const d = String(b?.departure || '').slice(8, 10);
-  if (a.length !== 2 || d.length !== 2) return false;
-  const da = String(parseInt(a, 10));
-  const dd = String(parseInt(d, 10));
+  const a = String(b?.arrival || '');
+  const d = String(b?.departure || '');
+  const a2 = a.slice(8, 10);
+  const d2 = d.slice(8, 10);
+  if (a2.length !== 2 || d2.length !== 2) return false;
+  const da = String(parseInt(a2, 10));
+  const dd = String(parseInt(d2, 10));
   if (da === 'NaN' || dd === 'NaN') return false;
-  const re = new RegExp(`(?<!\\d)0?${da}(?!\\d)(?:[\\/.\\-]\\d{1,2})?[^\\d]{1,30}?(?<!\\d)0?${dd}(?!\\d)`);
-  return re.test(String(normText || ''));
+  const am = parseInt(a.slice(5, 7), 10);
+  const dm = parseInt(d.slice(5, 7), 10);
+  const text = String(normText || '');
+  const re = new RegExp(`(?<!\\d)0?${da}(?!\\d)(?:[\\/.\\-](\\d{1,2}))?(?:[\\/.\\-]\\d{2,4})?([^\\d]{1,30}?)(?<!\\d)0?${dd}(?!\\d)(?:[\\/.\\-](\\d{1,2}))?(?:[\\/.\\-]\\d{2,4})?`, 'g');
+  for (const m of text.matchAll(re)) {
+    const end = m.index + m[0].length;
+    const arrMonth = m[1] ? Number(m[1]) : monthIn(m[2]);
+    const depMonth = m[3] ? Number(m[3]) : monthIn(text.slice(end, end + 15));
+    if (arrMonth && am && arrMonth !== am) continue;
+    if (depMonth && dm && depMonth !== dm) continue;
+    return true;
+  }
+  return false;
 }
 
 // Numéros de logement cités ("logement 1", "appartement 3", "Agate"...)
@@ -633,8 +657,7 @@ function waNameMatches(b, words) {
 function waIdentityScore(b, ctx) {
   let score = 0;
   const reasons = [];
-  const bk = phoneKey(b.phone || b.mobile || '');
-  if (bk && (bk === ctx.fromKey || (ctx.typedPhoneKeys || []).includes(bk))) { score++; reasons.push('téléphone'); }
+  if (bookingPhoneKeys(b).some(k => k === ctx.fromKey || (ctx.typedPhoneKeys || []).includes(k))) { score++; reasons.push('téléphone'); }
   if (b.email && (ctx.emails || []).includes(String(b.email).toLowerCase().trim())) { score++; reasons.push('email'); }
   if (waNameMatches(b, ctx.words)) { score++; reasons.push('nom'); }
   if (STAY_VERIFICATION && ctx.text && ctx.units && stayDatesMatch(b, ctx.text)) {
@@ -696,6 +719,7 @@ async function identifyWhatsAppGuest(from, history, text) {
     }
     if (best) {
       conv.verifiedBookingId = best.b.id;
+      conv.verifiedReasons = best.reasons;
       console.log(`✅ Voyageur vérifié (WhatsApp) | critères: ${best.reasons.join(', ')} | logement: ${best.b.roomId}`);
       return best.b;
     }
@@ -947,6 +971,7 @@ const ALERT_META = {
   contact_humain: { icon: '🙋', label: 'Demande à parler au propriétaire' },
   demande_horaire: { icon: '⏰', label: 'Arrivée anticipée / départ tardif à confirmer' },
   long_sejour: { icon: '💼', label: 'Long séjour / demande de tarif' },
+  voyageur_verifie: { icon: '🔓', label: 'Voyageur vérifié automatiquement – codes accessibles' },
   erreur_ia: { icon: '❗', label: 'Erreur technique – message sans réponse' },
   message_non_texte: { icon: '📎', label: 'Message audio / image / document reçu' }
 };
@@ -1016,7 +1041,7 @@ function describeRoom(roomId, propInfo) {
   return name || String(roomId);
 }
 
-function formatOwnerAlert({ channel, contact, question, reply, category = 'aucune', booking = null, bookingId = null, profileName = null, locked = false }, propInfo) {
+function formatOwnerAlert({ channel, contact, question, reply, category = 'aucune', booking = null, bookingId = null, profileName = null, locked = false, note = null }, propInfo) {
   const meta = ALERT_META[category];
   const isWa = channel === 'WhatsApp';
   const digits = String(contact).replace(/\D/g, '');
@@ -1038,11 +1063,12 @@ function formatOwnerAlert({ channel, contact, question, reply, category = 'aucun
     text += `\nVoyageur : non vérifié${profileName ? ` (profil WhatsApp : ${profileName})` : ''}`;
   }
   if (locked) text += '\n🔒 Vérification automatique bloquée (trop d\'emails essayés)';
+  if (note) text += `\n${note}`;
   text += `\n\nMessage : ${String(question).substring(0, 800)}\n\nRéponse envoyée : ${String(reply).substring(0, 1200)}`;
   return { shortRef, text };
 }
 
-async function notifyOwner({ channel, contact, question, reply, category = 'aucune', booking = null, bookingId = null, profileName = null, locked = false }) {
+async function notifyOwner({ channel, contact, question, reply, category = 'aucune', booking = null, bookingId = null, profileName = null, locked = false, note = null }) {
   try {
     const meta = ALERT_META[category];
     if (!meta && process.env.NOTIFY_ALL !== 'true') return true;
@@ -1055,7 +1081,7 @@ async function notifyOwner({ channel, contact, question, reply, category = 'aucu
     else if (String(channel).startsWith('Beds24') && bookingId) lastNotified = `b${bookingId}`;
 
     const propInfo = await getPropertyInfo();
-    const fmt = formatOwnerAlert({ channel, contact, question, reply, category, booking, bookingId, profileName, locked }, propInfo);
+    const fmt = formatOwnerAlert({ channel, contact, question, reply, category, booking, bookingId, profileName, locked, note }, propInfo);
 
     const cdKey = `${channel}|${contact}|${category}`;
     if (meta && Date.now() - (alertCooldown.get(cdKey) || 0) < ALERT_COOLDOWN_MS) {
@@ -1200,7 +1226,7 @@ function isPureCourtesy(text, lastAssistant) {
   return !askedQuestion && AMBIGUOUS_RE.test(t);
 }
 
-const COURTESY_SYSTEM = `Tu es l'agent concierge de la Résidence de l'Industrie. Le voyageur vient d'envoyer un simple remerciement, un au revoir ou un accusé de réception.
+const COURTESY_SYSTEM = `Tu es l'assistant virtuel de la Résidence de l'Industrie (un assistant automatisé, pas une personne). Le voyageur vient d'envoyer un simple remerciement, un au revoir ou un accusé de réception.
 Réponds par UNE seule courte phrase chaleureuse (une dizaine de mots), dans la langue du voyageur.
 Varie la formulation : ne reprends ni les mots ni la tournure de tes réponses précédentes dans la conversation.
 Sans question, sans lien, sans relance commerciale, sans markdown, sans balise. Un emoji au maximum, et seulement si le voyageur en a utilisé un.`;
@@ -1448,10 +1474,22 @@ async function handleWhatsAppMessage(message) {
   conv.identityText = ((conv.identityText || '') + ' \n ' + text).slice(-4000);
   conv.lastWasCourtesy = false;
 
+  const wasVerified = !!conv.verifiedBookingId; // pour détecter une vérification qui vient d'avoir lieu
   const [propInfo, booking] = await Promise.all([getPropertyInfo(), identifyWhatsAppGuest(from, history, text)]);
   const roomInfo = booking && propInfo ? propInfo.rooms.find(r => String(r.id) === String(booking.roomId)) || null : null;
   const verified = !!booking && !!propInfo;
   const introduced = !!conv.introduced || hasIntro(history);
+
+  // Voyageur tout juste vérifié automatiquement : le propriétaire est prévenu (les codes lui sont désormais accessibles).
+  // Pas d'alerte si c'est le propriétaire qui l'a validé (/valider) : verifiedBookingId existait déjà.
+  if (verified && !wasVerified && !conv.verifyAlertSent) {
+    conv.verifyAlertSent = true;
+    const keys = bookingPhoneKeys(booking);
+    const sameNumber = !keys.length ? 'inconnu (aucun téléphone dans la réservation)' : (keys.includes(phoneKey(from)) ? 'oui' : 'non');
+    await notifyOwner({ channel: 'WhatsApp', contact: from, question: text, reply: 'Accès aux codes débloqué pour ce voyageur.', category: 'voyageur_verifie', booking, profileName: message._profileName,
+      note: `Vérifié par : ${(conv.verifiedReasons || []).join(', ') || '?'}\nNuméro WhatsApp = numéro de la réservation : ${sameNumber}` });
+  }
+
   const systemPrompt = buildSystemPrompt({ propInfo, roomInfo, booking, isLoyal: false, channel: 'whatsapp', linksSent: conv.linksSent, locked: conv.locked, introduced });
 
   console.log('➡️ Appel Claude...');
@@ -2220,7 +2258,7 @@ module.exports = {
   app, isPureCourtesy, parseAlert, fallbackCategory, phoneKey, normalizeWaNumber,
   webIdentityScore, waIdentityScore, sanitizeChatMessages, buildSystemPrompt, executeTool, calendarHint,
   bookingFormatRules, applyAddressPolicy, isActiveStay, stayDatesMatch, extractUnits, hasIntro, ensureSignature, buildRoomNumbers, flattenForTemplate, catchupDecision, formatOwnerAlert, fmtDate,
-  detectPlatform, bookingPhone, bookingEventKind, formatBookingAlert
+  detectPlatform, bookingPhone, bookingEventKind, formatBookingAlert, bookingPhoneKeys
 };
 
 if (require.main === module) {
