@@ -17,6 +17,15 @@
  *   (par défaut : un voyageur est vérifié s'il donne son nom ET les dates exactes de son séjour ET son logement)
  * - ROOM_MAP (optionnel) JSON qui associe l'ID Beds24 de chaque logement à son numéro, ex. {"123456":1,"123457":2}
  *   (utile si les logements ne s'appellent pas Agate, Bégonia... dans Beds24 ; voir /test-verification)
+ * - PENDING_WATCH=off (optionnel) désactive la surveillance des demandes en attente et des réservations directes
+ * - PENDING_LOOKBACK_HOURS (optionnel, défaut 12) : fenêtre de recherche des réservations récentes
+ * - PENDING_ACK=on (optionnel, désactivé par défaut) : accusé de réception automatique au voyageur Airbnb/Booking
+ *   qui a fait une demande en attente (aucune promesse, la demande est dite "transmise au propriétaire")
+ *
+ * DEMANDES EN ATTENTE ET RÉSERVATIONS DIRECTES : toutes les 2 minutes, le bot prévient le propriétaire d'une demande
+ * en attente (statut Beds24 inquiry / request, toutes plateformes) et d'une nouvelle réservation directe (site),
+ * avec l'origine, le téléphone du voyageur (lien WhatsApp) et la disponibilité du logement. Il ne peut ni accepter
+ * ni refuser une demande : cela reste à faire dans Airbnb / Booking.
  *
  * COMMANDES PROPRIÉTAIRE (à envoyer au numéro du bot depuis OWNER_PHONE)
  * /pause [numéro|bIDRÉSERVATION] [heures] /reprise [numéro|bIDRÉSERVATION] /statut /aide
@@ -770,7 +779,7 @@ ${calendarHint()}`;
 }
 
 // Logements libres / occupés pour des dates données, d'après les réservations Beds24
-async function checkAvailability(arrival, departure) {
+async function checkAvailability(arrival, departure, excludeBookingId = null) {
   const token = await getBeds24Token();
   if (!token) return null;
   const propInfo = await getPropertyInfo();
@@ -799,6 +808,7 @@ async function checkAvailability(arrival, departure) {
   const busy = new Set(
     bookings
       .filter(b => !['cancelled', 'inquiry'].includes((b.status || '').toLowerCase()))
+      .filter(b => !excludeBookingId || String(b.id) !== String(excludeBookingId)) // ignorer la réservation examinée
       .filter(b => b.arrival < departure && b.departure > arrival) // chevauchement réel
       .map(b => String(b.roomId))
   );
@@ -806,14 +816,16 @@ async function checkAvailability(arrival, departure) {
 
   const free = [];
   const occupied = [];
+  const freeIds = [];
   const roomNumbers = buildRoomNumbers(propInfo);
   for (const room of propInfo.rooms) {
     const name = room.name || `Logement ${room.id}`;
     const link = AIRBNB_LINKS.find(l => l.num === roomNumbers.get(String(room.id)));
     const label = link ? `Logement ${link.num} - ${link.nom} (Airbnb : ${link.lien})` : name;
-    (busy.has(String(room.id)) ? occupied : free).push(label);
+    if (busy.has(String(room.id))) occupied.push(label);
+    else { free.push(label); freeIds.push(String(room.id)); }
   }
-  return { free, occupied };
+  return { free, occupied, freeIds };
 }
 
 const TOOLS = [{
@@ -863,6 +875,8 @@ function platformRules(platform) {
 Le voyageur t'écrit via Airbnb. Le tarif d'arrivée anticipée / départ tardif et le paiement à l'avance (Airbnb) s'appliquent. Pour les liens de réservation, ne donne que les liens Airbnb.`;
   if (platform === 'booking') return `=== PLATEFORME : BOOKING ===
 Le voyageur t'écrit via Booking. Le tarif Airbnb d'arrivée anticipée / départ tardif ne s'applique PAS : dis que le tarif est à convenir avec le propriétaire et utilise la balise demande_horaire. Pour les liens de réservation, ne donne que le lien Booking.`;
+  if (platform === 'direct') return `=== PLATEFORME : RÉSERVATION DIRECTE (SITE) ===
+Le voyageur a réservé en direct sur le site de la Résidence. Le tarif Airbnb d'arrivée anticipée / départ tardif ne s'applique PAS : dis que le tarif est à convenir avec le propriétaire et utilise la balise demande_horaire. Ne donne pas de liens Airbnb ou Booking, sauf si le voyageur les demande.`;
   return `=== PLATEFORME : NON DÉTERMINÉE ===
 Tu ne sais pas si le voyageur écrit via Airbnb ou Booking. Pour une arrivée anticipée ou un départ tardif, ne cite AUCUN tarif : transmets la demande au propriétaire (balise demande_horaire). Ne donne de liens de réservation que si le voyageur les demande.`;
 }
@@ -987,6 +1001,7 @@ function platformLabelFor(channel) {
   const c = String(channel || '').toLowerCase();
   if (c.includes('airbnb')) return 'Airbnb';
   if (c.includes('booking')) return 'Booking';
+  if (c.includes('direct')) return 'Site (direct)';
   if (c.includes('whatsapp')) return 'WhatsApp';
   if (c.includes('chat')) return 'Chat web';
   return 'Beds24';
@@ -1017,6 +1032,8 @@ function formatOwnerAlert({ channel, contact, question, reply, category = 'aucun
     text += `\nVoyageur : ${nm || 'inconnu'}`;
     text += `\nLogement : ${describeRoom(booking.roomId, propInfo)}`;
     text += `\nSéjour : ${fmtDate(booking.arrival)} au ${fmtDate(booking.departure)}`;
+    const bookingTel = bookingPhone(booking);
+    if (bookingTel && !isWa) text += `\nTéléphone (Beds24) : +${bookingTel}`;
   } else {
     text += `\nVoyageur : non vérifié${profileName ? ` (profil WhatsApp : ${profileName})` : ''}`;
   }
@@ -1532,12 +1549,17 @@ function messageText(msg) {
   return String(msg.message || msg.text || '').trim();
 }
 
-// Plateforme d'origine de la réservation, d'après la fiche Beds24
+// Origine de la réservation, d'après la fiche Beds24 : 'airbnb', 'booking', 'direct' (site) ou 'inconnue'.
+// On regarde d'abord channel / apiSource (fiables) ; le referer ne sert qu'en dernier recours.
 function detectPlatform(b) {
   if (!b) return 'inconnue';
-  const raw = normalizeText([b.channel, b.apiSource, b.referer].filter(Boolean).join(' '));
-  if (/airbnb/.test(raw)) return 'airbnb';
-  if (/booking/.test(raw)) return 'booking';
+  const src = normalizeText([b.channel, b.apiSource].filter(Boolean).join(' '));
+  if (/airbnb/.test(src)) return 'airbnb';
+  if (/booking/.test(src)) return 'booking';
+  if (/direct/.test(src)) return 'direct';
+  const ref = normalizeText(b.referer || '');
+  if (/airbnb/.test(ref)) return 'airbnb';
+  if (/booking\.com/.test(ref)) return 'booking';
   return 'inconnue';
 }
 
@@ -1742,6 +1764,144 @@ async function sendBeds24Message(token, bookingId, text) {
   }
 }
 
+// ==================== DEMANDES EN ATTENTE ET RÉSERVATIONS DIRECTES (Beds24) ====================
+// Toutes les 2 minutes, le bot regarde les réservations récentes de Beds24 et prévient le propriétaire :
+// - d'une demande en attente (statut inquiry / request). Airbnb envoie aussi les simples questions sur les dates en "inquiry" ;
+// - d'une nouvelle réservation directe (site), pour avoir le numéro du voyageur et le joindre sur WhatsApp.
+// Le bot ne peut ni accepter ni refuser une demande : cela reste à faire dans Airbnb / Booking.
+
+const PENDING_WATCH = String(process.env.PENDING_WATCH || '').toLowerCase() !== 'off';
+const PENDING_ACK = String(process.env.PENDING_ACK || '').toLowerCase() === 'on';
+const PENDING_STATUSES = ['inquiry', 'request'];
+const DIRECT_STATUSES = ['confirmed', 'new'];
+const seenBookingEvents = new Set();
+const bookingEventAttempts = new Map();
+let watchingBookings = false;
+
+// Téléphone du voyageur au format WhatsApp (indicatif pays, sans +), ou null. "mobile" passe avant "phone".
+function bookingPhone(b) {
+  for (const raw of [b?.mobile, b?.phone]) {
+    const n = normalizeWaNumber(raw).replace(/^330/, '33'); // "+33 (0)6..." -> 336...
+    if (n.length >= 9 && n.length <= 15) return n;
+  }
+  return null;
+}
+
+function maskPhone(p) { return p ? `+…${String(p).slice(-3)}` : null; }
+
+// 'pending' (demande en attente), 'direct' (nouvelle réservation du site) ou null (rien à signaler)
+function bookingEventKind(b, sinceMs = 0) {
+  const status = String(b?.status || '').toLowerCase();
+  if (PENDING_STATUSES.includes(status)) return 'pending';
+  if (detectPlatform(b) === 'direct' && DIRECT_STATUSES.includes(status)) {
+    // Réservation créée récemment seulement : modifier une ancienne fiche dans Beds24 ne doit pas relancer d'alerte
+    const created = Date.parse(b.bookingTime || b.modifiedTime || '');
+    if (created >= sinceMs) return 'direct';
+  }
+  return null;
+}
+
+function formatBookingAlert(b, kind, propInfo, availability = null) {
+  const origin = detectPlatform(b);
+  const originLabel = { airbnb: 'Airbnb', booking: 'Booking', direct: 'Site (réservation directe)' }[origin] || 'Origine inconnue';
+  const nm = `${b.firstName || ''} ${b.lastName || ''}`.trim();
+  const phone = bookingPhone(b);
+  const a = String(b.arrival || '').slice(0, 10);
+  const d = String(b.departure || '').slice(0, 10);
+  const nights = (a && d) ? Math.round((new Date(d + 'T00:00:00Z') - new Date(a + 'T00:00:00Z')) / 86400000) : null;
+
+  let t = kind === 'pending'
+    ? '📩 Demande en attente (demande de réservation ou question sur les dates)'
+    : '🆕 Nouvelle réservation directe (site)';
+  t += `\nPlate-forme (réservation) : ${originLabel} (${b.id})`;
+  t += `\nVoyageur : ${nm || 'inconnu'}`;
+  t += phone ? `\nTéléphone : +${phone}\nWhatsApp : https://wa.me/${phone}` : '\nTéléphone : non enregistré dans Beds24';
+  t += `\nLogement : ${describeRoom(b.roomId, propInfo)}`;
+  t += `\nSéjour : ${fmtDate(b.arrival)} au ${fmtDate(b.departure)}${Number.isFinite(nights) && nights > 0 ? ` (${nights} nuit${nights > 1 ? 's' : ''})` : ''}`;
+  if (kind === 'direct') t += `\nStatut Beds24 : ${b.status}`;
+  const price = Number(b.price);
+  if (price > 0) t += `\nPrix (Beds24) : ${price} €`;
+
+  if (kind === 'pending') {
+    if (availability) t += availability.free ? '\nDisponibilité : ce logement est libre sur ces dates' : '\nDisponibilité : ⚠️ ce logement est déjà pris sur ces dates';
+    else t += '\nDisponibilité : non vérifiée';
+  }
+  if (Number.isFinite(nights) && nights > 90) t += '\n⚠️ Dépasse la durée maximale de 90 jours.';
+  else if (Number.isFinite(nights) && nights >= 32) t += '\n💼 Long séjour (32 nuits ou plus) : proposition personnalisée à faire.';
+
+  const comment = String(b.comments || '').trim();
+  if (comment) t += `\nMessage du voyageur : ${comment.substring(0, 400)}`;
+  const note = String(b.notes || '').trim();
+  if (note) t += `\nNote Beds24 : ${note.substring(0, 200)}`;
+
+  if (kind === 'pending') {
+    t += origin === 'direct'
+      ? `\n\nÀ confirmer avec le voyageur${phone ? ' sur WhatsApp' : ''}.`
+      : `\n\nÀ traiter dans ${originLabel} : le bot ne peut ni accepter ni refuser la demande.`;
+  } else if (!phone) {
+    t += '\n\nPensez à demander son numéro au voyageur.';
+  }
+  return t;
+}
+
+// Le logement demandé est-il libre ? (la réservation examinée est ignorée dans le calcul)
+async function availabilityForBooking(b) {
+  try {
+    const a = String(b.arrival || '').slice(0, 10);
+    const d = String(b.departure || '').slice(0, 10);
+    if (!a || !d || a < parisToday() || d <= a) return null;
+    const r = await checkAvailability(a, d, b.id);
+    if (!r) return null;
+    return { free: r.freeIds.includes(String(b.roomId)) };
+  } catch (err) {
+    console.error('Erreur disponibilité demande:', err.message);
+    return null;
+  }
+}
+
+async function announceBooking(token, b, kind, propInfo) {
+  const availability = kind === 'pending' ? await availabilityForBooking(b) : null;
+  const ok = await sendOwnerAlert(formatBookingAlert(b, kind, propInfo, availability).substring(0, 4000));
+  console.log(ok ? '📩 Alerte envoyée' : '❌ Alerte NON envoyée', `| réservation ${b.id} | ${kind} | origine: ${detectPlatform(b)} | téléphone: ${bookingPhone(b) ? 'oui' : 'non'}`);
+  const origin = detectPlatform(b);
+  if (ok && PENDING_ACK && kind === 'pending' && (origin === 'airbnb' || origin === 'booking') && !isPaused(`b${b.id}`)) {
+    const msg = `Bonjour, je suis l'assistant virtuel de la Résidence de l'Industrie. Votre demande a bien été reçue et transmise au propriétaire, qui reviendra vers vous. Elle n'est pas encore confirmée.\n\n${SIGNATURE}`;
+    if (await sendBeds24Message(token, b.id, msg)) introducedBookings.add(String(b.id));
+  }
+  return ok;
+}
+
+async function checkNewBookings() {
+  if (!PENDING_WATCH || watchingBookings) return;
+  watchingBookings = true;
+  try {
+    const token = await getBeds24Token();
+    if (!token) return;
+    const hours = Number(process.env.PENDING_LOOKBACK_HOURS) || 12;
+    const sinceMs = Date.now() - hours * 3600 * 1000;
+    const response = await fetchT(`https://beds24.com/api/v2/bookings?modifiedFrom=${encodeURIComponent(new Date(sinceMs).toISOString())}&maxResults=100`, { headers: { 'token': token } });
+    if (!response.ok) { console.log('Erreur réservations récentes Beds24:', response.status); return; }
+    const raw = await response.json();
+    const list = raw?.data || raw;
+    if (!Array.isArray(list)) return;
+    const propInfo = await getPropertyInfo();
+    for (const b of list) {
+      const kind = bookingEventKind(b, sinceMs);
+      if (!kind || !b.id) continue;
+      const key = `${b.id}:${kind}`;
+      if (seenBookingEvents.has(key)) continue;
+      const n = (bookingEventAttempts.get(key) || 0) + 1;
+      bookingEventAttempts.set(key, n);
+      if (n > 5) { seenBookingEvents.add(key); console.error(`❌ Alerte abandonnée après 5 essais : ${key}`); continue; }
+      if (await announceBooking(token, b, kind, propInfo)) seenBookingEvents.add(key);
+    }
+  } catch (err) {
+    console.error('Erreur surveillance réservations:', err.message);
+  } finally {
+    watchingBookings = false;
+  }
+}
+
 // ==================== ROUTES ====================
 
 // Route publique minimale (pour un moniteur d'uptime) : aucune donnée sensible
@@ -1757,6 +1917,8 @@ app.get('/status', requireAdmin, async (req, res) => {
     whatsapp: process.env.WHATSAPP_TOKEN ? 'configuré' : 'manquant',
     signatureWhatsApp: process.env.WHATSAPP_APP_SECRET ? 'vérifiée' : 'NON vérifiée',
     verificationParSejour: STAY_VERIFICATION ? 'activée' : 'désactivée',
+    surveillanceDemandesEtReservationsDirectes: PENDING_WATCH ? 'activée' : 'désactivée',
+    accuseReceptionDemandes: PENDING_ACK ? 'activé' : 'désactivé',
     logements: propInfo?.rooms?.length || 0,
     reservationsActives: activeBookings.length,
     voyageursActifs: activeBookings.map(b => `${b.firstName} ${b.lastName} (logement ${b.roomId})`),
@@ -1886,6 +2048,10 @@ app.get('/test-beds24-requests', requireAdmin, async (req, res) => {
       champs_disponibles: list[0] ? Object.keys(list[0]) : [],
       reservations: list.map(b => ({
         id: b.id, status: b.status, channel: b.channel ?? null, apiSource: b.apiSource ?? null,
+        origine_detectee: detectPlatform(b),
+        champs_telephone_renvoyes_par_beds24: ['phone', 'mobile'].filter(k => k in b),
+        champ_telephone_rempli: b.mobile ? 'mobile' : (b.phone ? 'phone' : null),
+        telephone_masque: maskPhone(bookingPhone(b)),
         arrivee: b.arrival, depart: b.departure, roomId: b.roomId,
         nom: `${b.firstName || ''} ${b.lastName || ''}`.trim(),
         creee: b.bookingTime ?? null, modifiee: b.modifiedTime ?? null,
@@ -2053,13 +2219,17 @@ app.post('/api/chat', async (req, res) => {
 module.exports = {
   app, isPureCourtesy, parseAlert, fallbackCategory, phoneKey, normalizeWaNumber,
   webIdentityScore, waIdentityScore, sanitizeChatMessages, buildSystemPrompt, executeTool, calendarHint,
-  bookingFormatRules, applyAddressPolicy, isActiveStay, stayDatesMatch, extractUnits, hasIntro, ensureSignature, buildRoomNumbers, flattenForTemplate, catchupDecision, formatOwnerAlert, fmtDate
+  bookingFormatRules, applyAddressPolicy, isActiveStay, stayDatesMatch, extractUnits, hasIntro, ensureSignature, buildRoomNumbers, flattenForTemplate, catchupDecision, formatOwnerAlert, fmtDate,
+  detectPlatform, bookingPhone, bookingEventKind, formatBookingAlert
 };
 
 if (require.main === module) {
   // Polling Beds24 toutes les 2 minutes
   setInterval(fetchAndReplyBeds24Messages, 2 * 60 * 1000);
   setTimeout(fetchAndReplyBeds24Messages, 5000);
+  // Demandes en attente et réservations directes (premier passage 20 s après le démarrage, puis toutes les 2 minutes)
+  setInterval(checkNewBookings, 2 * 60 * 1000);
+  setTimeout(checkNewBookings, 20000);
 
   const PORT = process.env.PORT || 3000;
   app.listen(PORT, () => console.log('Serveur démarré sur port', PORT));
