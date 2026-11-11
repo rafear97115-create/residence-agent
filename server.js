@@ -19,6 +19,8 @@
  *   (utile si les logements ne s'appellent pas Agate, Bégonia... dans Beds24 ; voir /test-verification)
  * - PENDING_WATCH=off (optionnel) désactive la surveillance des demandes en attente et des réservations directes
  * - PENDING_LOOKBACK_HOURS (optionnel, défaut 12) : fenêtre de recherche des réservations récentes
+ * - IGNORE_BOOKING_NAMES (optionnel) : mots (séparés par des virgules) qui, dans le prénom ou le nom d'une réservation,
+ *   la font traiter comme un blocage : aucune alerte. Défaut : travaux,bloque,blocage,maintenance,indisponible,fermeture,proprietaire
  * - PENDING_ACK=on (optionnel, désactivé par défaut) : accusé de réception automatique au voyageur Airbnb/Booking
  *   qui a fait une demande en attente (aucune promesse, la demande est dite "transmise au propriétaire")
  *
@@ -462,6 +464,46 @@ async function getBeds24Token() {
   }
 }
 
+// Équipements déclarés dans Beds24 (Inventory > logement > équipements) : codes à plat, sans doublon.
+// Codes ignorés (modifiable sur Render : FEATURE_CODES_IGNORE="CODE1,CODE2") : ils sont cochés partout dans Beds24
+// mais ne correspondent pas forcément à la réalité (lit bébé, wifi de poche...). À retirer de la liste si c'est exact.
+const FEATURE_CODES_IGNORE = new Set((process.env.FEATURE_CODES_IGNORE || 'PACK_N_PLAY_TRAVEL_CRIB,WIFI_POCKET,CLEANING_BEFORE_CHECKOUT')
+  .split(',').map(s => s.trim().toUpperCase()).filter(Boolean));
+
+function flattenFeatures(fc) {
+  const out = [];
+  for (const g of (Array.isArray(fc) ? fc : [])) {
+    for (const c of (Array.isArray(g) ? g : [g])) {
+      const code = String(c || '').trim().toUpperCase();
+      if (/^[A-Z0-9_]{2,40}$/.test(code) && !FEATURE_CODES_IGNORE.has(code) && !out.includes(code)) out.push(code);
+    }
+  }
+  return out;
+}
+
+// Fiche par logement construite depuis Beds24 : surface, capacité, équipements (communs à tous, puis différences)
+function beds24UnitSheet(propInfo) {
+  const rooms = (propInfo?.rooms || []).filter(r => r.size || r.maxPeople || (r.features && r.features.length));
+  if (!rooms.length) return '';
+  const numbers = buildRoomNumbers(propInfo);
+  const common = rooms[0].features.filter(c => rooms.every(r => r.features.includes(c)));
+  const lines = rooms.map(r => {
+    const num = numbers.get(String(r.id));
+    const link = AIRBNB_LINKS.find(l => l.num === num);
+    const label = link ? `Logement ${link.num} (${link.nom})` : (r.name || `Logement ${r.id}`);
+    const extra = r.features.filter(c => !common.includes(c));
+    const parts = [];
+    if (r.size) parts.push(`${r.size} m²`);
+    if (r.maxPeople) parts.push(`${r.maxPeople} personnes maximum`);
+    if (extra.length) parts.push(`équipements en plus : ${extra.join(', ')}`);
+    return `- ${label} : ${parts.join(' ; ') || 'aucune donnée'}`;
+  });
+  return `Source : Beds24 (codes d'équipements, à traduire en français pour le voyageur).
+Équipements communs à tous les logements : ${common.join(', ') || 'aucun'}
+${lines.join('\n')}
+Un équipement qui n'apparaît pas ici est INCONNU (pas forcément absent) : ne dis pas qu'il n'existe pas, dis que tu transmets la question au propriétaire (balise contact_humain).`;
+}
+
 let propertyCache = null;
 let propertyCacheTime = 0;
 
@@ -486,6 +528,9 @@ async function getPropertyInfo() {
         codeBoite: room.templates?.template1 || '',
         emplacement: room.templates?.template3 || '',
         wifi: room.templates?.template4 || prop?.templates?.template2 || '',
+        size: Number(room.roomSize) || null,
+        maxPeople: Number(room.maxPeople) || null,
+        features: flattenFeatures(room.featureCodes),
       }))
     };
     propertyCacheTime = now;
@@ -935,6 +980,9 @@ function buildSystemPrompt({ propInfo = null, roomInfo = null, booking = null, i
 
   if (LOCK_INSTRUCTIONS.trim()) prompt += `\n\n=== SERRURE / DIGICODE (fonctionnement) ===\n${LOCK_INSTRUCTIONS.trim()}`;
   if (UNIT_SHEET.trim()) prompt += `\n\n=== FICHE PAR LOGEMENT ===\n${UNIT_SHEET.trim()}\nTout ce qui n'est écrit dans aucune section de ce document est INCONNU : ne l'invente pas.`;
+
+  const b24Sheet = beds24UnitSheet(propInfo);
+  if (b24Sheet) prompt += `\n\n=== ÉQUIPEMENTS DES LOGEMENTS (Beds24) ===\n${b24Sheet}`;
 
   if (platform) prompt += `\n\n${platformRules(platform)}`;
 
@@ -1827,8 +1875,18 @@ function bookingPhone(b) {
 
 function maskPhone(p) { return p ? `+…${String(p).slice(-3)}` : null; }
 
+// Blocages saisis comme réservations (ex. prénom/nom "Travaux", "Bloqué", "Maintenance") : jamais d'alerte.
+// Modifiable sur Render : IGNORE_BOOKING_NAMES="travaux,bloque,maintenance" (mots séparés par des virgules, sans accents ni majuscules).
+const IGNORE_BOOKING_NAMES = (process.env.IGNORE_BOOKING_NAMES || 'travaux,bloque,blocage,maintenance,indisponible,fermeture,proprietaire')
+  .split(',').map(s => normalizeText(s).trim()).filter(Boolean);
+function isBlockBooking(b) {
+  const words = new Set(tokens(`${b?.firstName || ''} ${b?.lastName || ''}`));
+  return IGNORE_BOOKING_NAMES.some(n => words.has(n));
+}
+
 // 'pending' (demande en attente), 'direct' (nouvelle réservation du site) ou null (rien à signaler)
 function bookingEventKind(b, sinceMs = 0) {
+  if (isBlockBooking(b)) return null;
   const status = String(b?.status || '').toLowerCase();
   if (PENDING_STATUSES.includes(status)) return 'pending';
   if (detectPlatform(b) === 'direct' && DIRECT_STATUSES.includes(status)) {
@@ -2258,7 +2316,7 @@ module.exports = {
   app, isPureCourtesy, parseAlert, fallbackCategory, phoneKey, normalizeWaNumber,
   webIdentityScore, waIdentityScore, sanitizeChatMessages, buildSystemPrompt, executeTool, calendarHint,
   bookingFormatRules, applyAddressPolicy, isActiveStay, stayDatesMatch, extractUnits, hasIntro, ensureSignature, buildRoomNumbers, flattenForTemplate, catchupDecision, formatOwnerAlert, fmtDate,
-  detectPlatform, bookingPhone, bookingEventKind, formatBookingAlert, bookingPhoneKeys
+  detectPlatform, bookingPhone, bookingEventKind, formatBookingAlert, bookingPhoneKeys, isBlockBooking, flattenFeatures, beds24UnitSheet
 };
 
 if (require.main === module) {
