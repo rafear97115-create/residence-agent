@@ -2,6 +2,8 @@
  * Assistant virtuel — Résidence de l'Industrie
  *
  * VARIABLES D'ENVIRONNEMENT (Render)
+ * - SECRETS (optionnel) : UN seul JSON regroupant les autres variables, ex. {"ANTHROPIC_KEY":"...","WHATSAPP_TOKEN":"..."}
+ *   (voir src/secrets.js ; une variable Render séparée du même nom reste prioritaire)
  * Existantes : ANTHROPIC_KEY, BEDS24_REFRESH_TOKEN, BEDS24_TOKEN, WHATSAPP_PHONE_ID,
  * WHATSAPP_TOKEN, OWNER_PHONE
  * - ADMIN_KEY (OBLIGATOIRE pour /status, /test-*, /setup-beds24, /debug-beds24)
@@ -99,6 +101,7 @@
  *   routes/            webhook.js, admin.js, chat.js
  */
 
+require('./src/secrets'); // doit rester en premier : charge la variable SECRETS (JSON) dans process.env
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
