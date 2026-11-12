@@ -55,12 +55,13 @@
    (le bot peut alors transmettre sa demande de tarif préférentiel au Service Relation Client ; aucun tarif n'est jamais promis)
  *
  * DEMANDES EN ATTENTE ET RÉSERVATIONS DIRECTES : toutes les 2 minutes, le bot prévient le propriétaire d'une demande
- * en attente (statut Beds24 inquiry / request, toutes plateformes) et d'une nouvelle réservation directe (site),
+ * en attente (statut Beds24 inquiry / request, toutes plateformes) et de toute nouvelle réservation confirmée (site, Airbnb, Booking),
  * avec l'origine, le téléphone du voyageur (lien WhatsApp) et la disponibilité du logement. Il ne peut ni accepter
  * ni refuser une demande : cela reste à faire dans Airbnb / Booking.
  *
  * COMMANDES PROPRIÉTAIRE (à envoyer au numéro du bot depuis OWNER_PHONE) : /aide les explique, avec des exemples
  * /aide : la liste des commandes, expliquées
+ * /sejour [jours] : séjours en cours et à venir (30 jours par défaut, 365 au maximum)
  * /statut : état du bot (en ligne depuis..., conversations en pause, numéros bloqués, voyageurs reconnus, réglages actifs)
  * /repondre numéro|bIDRÉSERVATION message : envoie VOTRE réponse au voyageur (WhatsApp, ou Airbnb/Booking via Beds24),
  *   à utiliser en cas de réelle nécessité. Le destinataire est OBLIGATOIRE (plus de destinataire par défaut).
