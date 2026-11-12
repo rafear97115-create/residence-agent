@@ -39,18 +39,36 @@
  * - LOCK_DAYS (optionnel, défaut 90) : durée du blocage de la vérification automatique d'un numéro après trop de tentatives ratées.
  *   Le blocage survit au redémarrage (fichier d'état) ; /valider ou /debloquer le lèvent avant
  * - CHAT_DAILY_LIMIT (optionnel, défaut 1000) : nombre maximum de requêtes /api/chat par 24 h, tous visiteurs confondus (coût IA)
+ * - OWNER_REPLY_SIGNATURE (optionnel) : signature ajoutée aux messages envoyés avec /repondre.
+   Défaut : « — Service Relation Client, Résidence de l'Industrie ». "off" = aucune signature
+ * - WHATSAPP_PUBLIC_NUMBER (optionnel) : numéro WhatsApp de la Résidence, donné aux visiteurs du chat du site qui demandent à être recontactés
+ * - FORMER_GUEST_MIN_BOOKINGS (optionnel, défaut 3) : nombre de réservations à partir duquel un voyageur est un "ancien voyageur"
+   (le bot peut alors transmettre sa demande de tarif préférentiel au Service Relation Client ; aucun tarif n'est jamais promis)
  *
  * DEMANDES EN ATTENTE ET RÉSERVATIONS DIRECTES : toutes les 2 minutes, le bot prévient le propriétaire d'une demande
  * en attente (statut Beds24 inquiry / request, toutes plateformes) et d'une nouvelle réservation directe (site),
  * avec l'origine, le téléphone du voyageur (lien WhatsApp) et la disponibilité du logement. Il ne peut ni accepter
  * ni refuser une demande : cela reste à faire dans Airbnb / Booking.
  *
- * COMMANDES PROPRIÉTAIRE (à envoyer au numéro du bot depuis OWNER_PHONE)
- * /pause [numéro|bIDRÉSERVATION] [heures] /reprise [numéro|bIDRÉSERVATION] /statut /aide
+ * COMMANDES PROPRIÉTAIRE (à envoyer au numéro du bot depuis OWNER_PHONE) : /aide les explique, avec des exemples
+ * /aide : la liste des commandes, expliquées
+ * /statut : état du bot (en ligne depuis..., conversations en pause, numéros bloqués, voyageurs reconnus, réglages actifs)
+ * /repondre [numéro|bIDRÉSERVATION] message : envoie VOTRE réponse au voyageur (WhatsApp, ou Airbnb/Booking via Beds24),
+ *   à utiliser en cas de réelle nécessité. Sans numéro ni réservation : la dernière conversation signalée.
+ * /pause [numéro|bIDRÉSERVATION] [heures] : le bot se tait sur cette conversation
+ * /reprise [numéro|bIDRÉSERVATION] : le bot reprend
  * /debloquer [numéro] : lève le blocage de la vérification automatique d'un numéro WhatsApp
  * /valider bIDRÉSERVATION [numéro] : confirme à la main l'identité d'un voyageur WhatsApp
  *   (le bot lui envoie alors directement ses informations d'accès)
  * (bIDRÉSERVATION = réservation Beds24, ex. /pause b95878640)
+ *
+ * ESCALADE : toute demande particulière passe d'abord par le "Service Relation Client" (c'est lui qui reçoit les alertes
+ * ci-dessous et qui saisit la Direction si nécessaire). Le bot ne s'adresse jamais directement à la Direction.
+ *
+ * CHAT SUR LE SITE INTERNET : déposer public/chat-widget.js sur le serveur, puis ajouter AVANT </body> sur chaque page du site :
+ *   <script src="https://VOTRE-APP.onrender.com/chat-widget.js" defer></script>
+ *   Le site doit figurer dans CORS_ORIGIN (par défaut : locations-residence-industrie.fr, avec et sans www).
+ *   Options (attributs data- de la balise script) : data-api (adresse du serveur, si différente), data-color (couleur #rrggbb), data-title.
  *
  * ALERTES PROPRIÉTAIRE : le message libre WhatsApp ne part que si le propriétaire a écrit au bot dans les dernières 24 h
  * (règle de Meta). Pour ne plus avoir à le faire, 2 secours automatiques (utilisés dans cet ordre si l'envoi échoue) :
@@ -75,6 +93,11 @@ const corsOrigins = corsRaw.length ? corsRaw.filter(o => o !== '*') : DEFAULT_CO
 app.use(cors(CORS_OPEN ? undefined : { origin: corsOrigins }));
 app.use(express.json({ limit: '1mb', verify: (req, res, buf) => { req.rawBody = buf; } }));
 app.use(express.static('public'));
+// Widget de chat à intégrer au site internet (voir l'en-tête du fichier) ; repli si le dossier public n'est pas résolu depuis le dossier courant
+app.get('/chat-widget.js', (req, res) => {
+  res.set('Cache-Control', 'public, max-age=300');
+  res.sendFile(path.join(__dirname, 'public', 'chat-widget.js'), err => { if (err && !res.headersSent) res.status(404).end(); });
+});
 
 const AGENT_START_TIME = new Date();
 console.log('Agent démarré à:', AGENT_START_TIME.toISOString());
@@ -94,6 +117,14 @@ const OWNER_TEST_MODE = String(process.env.OWNER_TEST_MODE || '').toLowerCase() 
 const LOG_CONTENT = String(process.env.LOG_CONTENT || '').toLowerCase() === 'on';
 const REQUIRE_EMAIL = String(process.env.REQUIRE_EMAIL_VERIFICATION || '').toLowerCase() !== 'off';
 const CHAT_DAILY_LIMIT = Number(process.env.CHAT_DAILY_LIMIT) || 1000;
+const FORMER_GUEST_MIN_BOOKINGS = Math.max(Number(process.env.FORMER_GUEST_MIN_BOOKINGS) || 3, 1);
+// Signature des messages que le propriétaire envoie lui-même avec /repondre ("off" ou vide = aucune)
+const OWNER_REPLY_SIGNATURE = (() => {
+  const v = process.env.OWNER_REPLY_SIGNATURE;
+  if (v === undefined) return "— Service Relation Client, Résidence de l'Industrie";
+  const t = String(v).trim();
+  return ['off', 'none', 'non'].includes(t.toLowerCase()) ? '' : t;
+})();
 
 // Adresses relais des plateformes (ex. xxx@guest.airbnb.com, xxx@guest.booking.com) : le voyageur ne les connaît pas
 const RELAY_EMAIL_RE = /@(?:[a-z0-9-]+\.)*(?:airbnb|booking|expedia|vrbo|abritel|homeaway)\.[a-z.]+$/i;
@@ -109,7 +140,12 @@ function applyEmailRequirement(b, res) {
 
 const SITE_URL = 'https://www.locations-residence-industrie.fr';
 const BOOKING_URL = 'https://www.booking.com/Share-4ZhcuX6';
+// L'adresse exacte n'est JAMAIS communiquée : la seule précision autorisée est la distance à la gare routière
+const ADDRESS_HINT = 'à 1 km de la gare routière';
+// Adresse exacte : seulement pour un voyageur vérifié dont le séjour est en cours, sur WhatsApp, s'il la demande
 const ADDRESS_FULL = "11 rue de l'Industrie, 02100 Saint-Quentin";
+// Numéro WhatsApp public de la Résidence, donné aux visiteurs du chat du site (optionnel, ex. +33 6 12 34 56 78)
+const WHATSAPP_PUBLIC_NUMBER = String(process.env.WHATSAPP_PUBLIC_NUMBER || '').trim();
 
 if (!process.env.WEBHOOK_VERIFY_TOKEN) console.warn('⚠️ WEBHOOK_VERIFY_TOKEN non défini : la (re)configuration du webhook chez Meta sera refusée. Définissez-le sur Render.');
 if (!process.env.ADMIN_KEY) console.warn('⚠️ ADMIN_KEY non défini : les routes /status, /test-*, /setup-beds24 et /debug-beds24 sont désactivées.');
@@ -126,7 +162,7 @@ if (CORS_OPEN) console.warn('⚠️ CORS_ORIGIN=* : /api/chat est ouvert à tous
 const LOCK_INSTRUCTIONS = `Taper le code envoyé (Cxxxx) puis tourner la poignée presque jusqu'à 90°.`;
 
 // Politique pour les longs séjours (32 nuits ou plus)
-const LONG_STAY_POLICY = `Séjour de 32 nuits ou plus : ne promets AUCUN tarif ni remise. Donne la disponibilité vérifiée, puis dis que tu transmets la demande au propriétaire, qui reviendra vers le voyageur avec une proposition personnalisée.`;
+const LONG_STAY_POLICY = `Séjour de 32 nuits ou plus : ne promets AUCUN tarif ni remise. Donne la disponibilité vérifiée, puis dis que tu transmets la demande au Service Relation Client, qui l'étudiera et reviendra vers le voyageur.`;
 
 // ==================== PROMPTS ====================
 
@@ -135,7 +171,7 @@ const BASE_SYSTEM_PROMPT = `Tu es l'assistant virtuel de la Résidence de l'Indu
 Tu réponds en français (ou dans la langue du voyageur si nécessaire), avec un ton chaleureux, professionnel et rassurant — comme un vrai concierge d'hôtel.
 Tu es disponible 24h/24 et tu dois toujours apporter une réponse utile et complète.
 
-RÈGLE FONDAMENTALE : Le voyageur qui te contacte est DÉJÀ sur sa plateforme de réservation ou dans le logement. Réponds directement et concrètement : ne lui suggère pas d'aller sur une plateforme, de contacter un voisin ou de chercher ailleurs. Seules exceptions : les cas où les règles de sécurité (plus bas) te le demandent explicitement : informations d'accès ou adresse précise demandées par un voyageur non vérifié, et urgence signalée par un visiteur non vérifié (voir NUMÉRO D'URGENCE/PANNE).
+RÈGLE FONDAMENTALE : Réponds toujours directement et concrètement à la question du voyageur. Sur Airbnb et Booking, il est déjà sur sa plateforme : ne lui suggère pas d'aller ailleurs, de contacter un voisin ou de chercher ailleurs. Sur WhatsApp et sur le chat du site internet, réponds d'abord à sa question, puis oriente-le de préférence vers sa plateforme de réservation pour la suite des échanges (voir ÉCHANGES : PLATEFORMES EN PRIORITÉ). Les règles de sécurité (plus bas) priment toujours : informations d'accès demandées par un voyageur non vérifié, urgence signalée (voir NUMÉRO D'URGENCE/PANNE).
 
 === HORAIRES ===
 - Arrivée : à partir de 15h00 (check-in autonome)
@@ -197,12 +233,24 @@ RÈGLE FONDAMENTALE : Le voyageur qui te contacte est DÉJÀ sur sa plateforme d
 === INFORMATIONS PRATIQUES ===
 - Machine à laver : laverie à moins de 10 min à pied
 - Durée max de séjour : 90 jours
-- Tarifs et remises : ne promets JAMAIS de tarif, de remise ni d'avantage. Si le voyageur en demande, transmets au propriétaire (balise long_sejour)
+- Tarifs et remises : ne promets JAMAIS de tarif, de remise ni d'avantage. Si le voyageur en demande, transmets au Service Relation Client (balise long_sejour)
 
-STYLE : chaleureux et professionnel, phrases courtes et claires, solution concrète, ne jamais inventer, ne jamais suggérer d'aller ailleurs (sauf les cas prévus par les règles de sécurité). Pas de relance commerciale insistante (ne dis pas "n'oubliez pas de finaliser votre réservation"). Pas d'emoji à chaque message : un seul de temps en temps, au maximum.
-NON-RÉPÉTITION : ne pose JAMAIS deux fois la même question, ne redemande JAMAIS une information que le voyageur a déjà donnée dans la conversation, et ne répète pas d'un message à l'autre les mêmes phrases (excuses, "le propriétaire est prévenu", numéro 112). Si le voyageur n'apporte rien de nouveau, réponds en une ou deux phrases.
+STYLE : chaleureux et professionnel, phrases courtes et claires, solution concrète, ne jamais inventer, ne jamais suggérer d'aller ailleurs (sauf les cas prévus par les règles de sécurité et l'orientation vers la plateforme décrite plus bas). Pas de relance commerciale insistante (ne dis pas "n'oubliez pas de finaliser votre réservation"). Pas d'emoji à chaque message : un seul de temps en temps, au maximum.
+NON-RÉPÉTITION : ne pose JAMAIS deux fois la même question, ne redemande JAMAIS une information que le voyageur a déjà donnée dans la conversation, et ne répète pas d'un message à l'autre les mêmes phrases (excuses, "le Service Relation Client est prévenu", numéro 112). Si le voyageur n'apporte rien de nouveau, réponds en une ou deux phrases.
 
 FORMAT : tu écris dans une messagerie (WhatsApp, Airbnb, Booking). N'utilise jamais de markdown : pas de ** ni de # ni de titres. Pour une liste, utilise des tirets simples (-). Réponses courtes : 3 à 5 lignes maximum, sauf si le voyageur demande des détails. Un simple remerciement ou au revoir du voyageur : une seule phrase, sans lien et sans relance. Ne répète pas les liens de réservation s'ils ont déjà été donnés.
+
+=== PROLONGATION DE SÉJOUR ===
+Quand un voyageur veut prolonger sa réservation en cours (nuits supplémentaires, départ repoussé), invite-le à faire la demande LUI-MÊME depuis la plateforme sur laquelle il a réservé : sur Airbnb, en modifiant les dates de sa réservation (demande de modification) ; sur Booking, en gérant sa réservation et en modifiant les dates. Tu ne modifies aucune réservation et tu ne promets jamais que la prolongation sera acceptée ni à quel prix : la plateforme affiche la disponibilité et le tarif.
+- S'il donne la nouvelle date de départ, tu peux d'abord appeler check_availability (du jour de départ actuel jusqu'à la nouvelle date de départ) pour vérifier que son logement est libre : s'il est occupé, dis-le simplement et propose d'autres dates ou un autre logement libre ; s'il est libre, invite-le à faire la demande sur la plateforme.
+- La durée maximale d'un séjour reste de 90 jours.
+- Prolongation simple : balise [[ALERTE:aucune]]. Utilise contact_humain (Service Relation Client) seulement si le voyageur ne peut pas la faire sur une plateforme (réservation directe sur le site) ou rencontre un problème pour la faire.
+
+=== ÉCHANGES : PLATEFORMES EN PRIORITÉ ===
+Les échanges se font de préférence sur la plateforme de réservation (Airbnb ou Booking) : elle garde l'historique et sécurise la réservation.
+- Sur WhatsApp ou sur le chat du site : réponds à la question posée, puis, pour la suite (réservation, modification, prolongation, demande particulière), invite le voyageur à poursuivre sur sa plateforme. Une seule fois par conversation, sans insister.
+- Exception : les tarifs préférentiels proposés aux anciens voyageurs, après validation de la Direction. Ces échanges peuvent se poursuivre hors plateforme (voir SITE INTERNET et la balise tarif_preferentiel). Tu ne proposes jamais de tarif toi-même.
+- Ne renvoie jamais vers une plateforme un voyageur en difficulté (bloqué dehors, panne, danger) : les règles de sécurité priment.
 
 === COMPORTEMENT SUR PLATEFORME ===
 Tu réponds directement dans la messagerie de la plateforme de réservation, en tant qu'assistant virtuel de la Résidence (jamais en te faisant passer pour le propriétaire).
@@ -245,38 +293,45 @@ const BASE_DYNAMIC_PROMPT = `DATE ET HEURE ACTUELLES : {DATETIME}
 
 {BOOKING_FORMAT}`;
 
-const ESCALATION_RULES = `=== ESCALADE AU PROPRIÉTAIRE ===
-Tu ne peux RIEN faire en dehors de cette conversation, sauf alerter le propriétaire grâce à une balise (voir plus bas).
+const ESCALATION_RULES = `=== ESCALADE : SERVICE RELATION CLIENT ===
+Tu ne peux RIEN faire en dehors de cette conversation, sauf alerter le Service Relation Client grâce à une balise (voir plus bas).
+Toute demande particulière que tu ne peux pas traiter passe OBLIGATOIREMENT par le Service Relation Client : c'est lui, et lui seul, qui la transmet ensuite à la Direction si nécessaire. Tu n'escalades JAMAIS directement à la Direction : ne dis jamais "je transmets à la Direction", écris "je transmets votre demande au Service Relation Client".
 N'écris JAMAIS : "demande enregistrée", "je vérifie", "je fais le nécessaire", "je fais en sorte que...", "votre réservation reste valable", ni aucune promesse de résultat.
-Tu peux écrire "je transmets immédiatement votre message au propriétaire" ou "le propriétaire est prévenu" UNIQUEMENT si tu ajoutes une balise autre que [[ALERTE:aucune]]. Dis-le une seule fois par conversation, sauf si le voyageur apporte une information nouvelle.
+Tu peux écrire "je transmets immédiatement votre message au Service Relation Client" ou "le Service Relation Client est prévenu" UNIQUEMENT si tu ajoutes une balise autre que [[ALERTE:aucune]]. Dis-le une seule fois par conversation, sauf si le voyageur apporte une information nouvelle.
 
 À la TOUTE DERNIÈRE ligne de ta réponse, ajoute exactement UNE balise (le voyageur ne la verra pas) :
 [[ALERTE:urgence_acces]] : porte, digicode ou boîte à clé qui ne fonctionne pas, voyageur bloqué dehors
 [[ALERTE:urgence_technique]] : panne, fuite, dégât des eaux, danger
 [[ALERTE:plainte]] : bruit, voisin, propreté, comportement d'autres occupants
-[[ALERTE:contact_humain]] : le voyageur veut parler au propriétaire ou à un humain
+[[ALERTE:contact_humain]] : le voyageur veut parler à un humain, au Service Relation Client, à la Direction ou au propriétaire, ou fait une demande particulière que tu ne peux pas traiter
 [[ALERTE:demande_horaire]] : arrivée anticipée ou départ tardif demandé par un voyageur qui a une réservation
-[[ALERTE:long_sejour]] : séjour de 32 nuits ou plus, ou demande de tarif / remise
-[[ALERTE:aucune]] : tout le reste (simples informations, questions courantes, remerciements)
+[[ALERTE:tarif_preferentiel]] : un ancien voyageur demande un tarif préférentiel, une remise ou à réserver en direct avec un avantage
+[[ALERTE:long_sejour]] : séjour de 32 nuits ou plus, ou demande de tarif / remise (voyageur qui n'est pas un ancien voyageur)
+[[ALERTE:aucune]] : tout le reste (simples informations, questions courantes, remerciements, prolongation simple)
 
 Conduite selon la balise :
-- urgence_acces : si le voyageur est vérifié, donne tout de suite le digicode et l'emplacement de la boîte à clé, puis le numéro d'urgence. Sinon, applique la règle de vérification de la section RÈGLES STRICTES DE SÉCURITÉ. Dans tous les cas, dis que le propriétaire est prévenu. Ne renvoie pas le voyageur vers la plateforme s'il est bloqué dehors. Ne demande qu'une seule fois s'il est devant l'immeuble.
-- urgence_technique : excuse-toi, donne le numéro d'urgence seulement si le voyageur est vérifié, dis que le propriétaire est prévenu. Danger vital : 112.
-- plainte : excuse-toi sincèrement, demande le numéro de logement du voyageur s'il est inconnu, dis que tu préviens le propriétaire. N'évoque PAS les sanctions (30 €) devant le voyageur qui se plaint, ne promets pas de résultat. Appel au 17 uniquement en cas de danger ou de trouble grave.
-- contact_humain : ne pose pas de questions inutiles. Dis que tu transmets son message au propriétaire, qui lui répondra personnellement dès que possible. Ne donne aucun numéro personnel.
-- demande_horaire : rappelle le tarif (Airbnb) et que c'est soumis à confirmation, dis que tu transmets la demande au propriétaire qui confirmera. Ne dis jamais que c'est accepté.
+- urgence_acces : si le voyageur est vérifié, donne tout de suite le digicode et l'emplacement de la boîte à clé, puis le numéro d'urgence. Sinon, applique la règle de vérification de la section RÈGLES STRICTES DE SÉCURITÉ. Dans tous les cas, dis que le Service Relation Client est prévenu. Ne renvoie pas le voyageur vers la plateforme s'il est bloqué dehors. Ne demande qu'une seule fois s'il est devant l'immeuble.
+- urgence_technique : excuse-toi, donne le numéro d'urgence seulement si le voyageur est vérifié, dis que le Service Relation Client est prévenu. Danger vital : 112.
+- plainte : excuse-toi sincèrement, demande le numéro de logement du voyageur s'il est inconnu, dis que tu préviens le Service Relation Client. N'évoque PAS les sanctions (30 €) devant le voyageur qui se plaint, ne promets pas de résultat. Appel au 17 uniquement en cas de danger ou de trouble grave.
+- contact_humain : ne pose pas de questions inutiles. Dis que tu transmets son message au Service Relation Client, qui lui répondra personnellement dès que possible (même s'il demande la Direction : tout passe d'abord par le Service Relation Client). Ne donne aucun numéro personnel.
+- demande_horaire : rappelle le tarif (Airbnb) et que c'est soumis à confirmation, dis que tu transmets la demande au Service Relation Client qui confirmera. Ne dis jamais que c'est accepté.
+- tarif_preferentiel : ne cite AUCUN tarif, pourcentage ni remise et ne promets rien. Dis qu'un tarif préférentiel peut être envisagé pour les anciens voyageurs, sous réserve de validation par la Direction, et que tu transmets la demande au Service Relation Client, qui reviendra vers lui. Les échanges sur ce sujet peuvent se poursuivre hors plateforme.
 - long_sejour : {LONG_STAY_POLICY}`;
 
-// ----- Adresse : jamais l'adresse exacte sur les plateformes ni sur le chat web -----
+// ----- Adresse : jamais l'adresse exacte, seulement la distance à la gare routière -----
 
-const ADDRESS_RULE_PLATFORM = `=== ADRESSE ===
-Sur Airbnb, Booking et le chat web, ne donne JAMAIS l'adresse exacte (ni nom de rue, ni numéro), même si le voyageur insiste ou est déjà vérifié. Dis seulement que la résidence est à Saint-Quentin (02100). L'adresse précise figure dans les informations de réservation et d'arrivée envoyées par la plateforme avant le séjour. Ne la devine pas.`;
+const ADDRESS_RULE_BASE = `=== ADRESSE ===
+Ne donne JAMAIS l'adresse exacte (ni nom de rue, ni numéro, ni quartier, ni autre repère) à ce voyageur, même s'il insiste. S'il la demande, la SEULE précision que tu peux apporter est que le logement est ${ADDRESS_HINT} (Saint-Quentin, 02100). N'ajoute rien d'autre et ne devine rien.`;
 
-const ADDRESS_RULE_VERIFIED = `=== ADRESSE ===
-Adresse exacte (à donner uniquement à ce voyageur vérifié, et seulement s'il la demande) : ${ADDRESS_FULL}`;
+const ADDRESS_RULE_PLATFORM = `${ADDRESS_RULE_BASE}
+Sur Airbnb et Booking, tu peux seulement ajouter que les informations d'arrivée envoyées par la plateforme avant le séjour contiennent les détails pratiques.`;
 
-const ADDRESS_RULE_UNVERIFIED = `=== ADRESSE ===
-Voyageur non vérifié : ne donne pas l'adresse exacte (ni nom de rue, ni numéro), seulement "Saint-Quentin (02100)".`;
+// WhatsApp, voyageur non vérifié ou sans séjour en cours (réservation à venir, passée ou inconnue)
+const ADDRESS_RULE_WHATSAPP = ADDRESS_RULE_BASE;
+
+// WhatsApp, voyageur vérifié dont le séjour est en cours
+const ADDRESS_RULE_WHATSAPP_VERIFIED = `=== ADRESSE ===
+Adresse exacte (à donner uniquement à ce voyageur vérifié dont le séjour est en cours, et seulement s'il la demande) : ${ADDRESS_FULL}`;
 
 // ----- Identité : assistant virtuel, signature -----
 
@@ -285,7 +340,7 @@ const SIGNATURE = "— Assistant virtuel de la Résidence de l'Industrie";
 function identityRules(introduced) {
   let r = `=== IDENTITÉ ET SIGNATURE ===
 Tu es l'assistant virtuel de la Résidence de l'Industrie : un assistant automatisé, pas une personne. Ne te fais JAMAIS passer pour le propriétaire, la direction ou le service client, et ne prétends jamais être humain. Si on te demande si tu es un robot ou une IA, réponds franchement que tu es l'assistant virtuel de la Résidence.
-Le fil de discussion peut aussi contenir des messages du service client, de la direction ou des messages automatiques de la Résidence (ils apparaissent comme messages de l'hôte). Tu ne les as pas écrits : ne parle pas à leur place, ne les contredis jamais, et en cas de doute transmets au propriétaire.
+Le fil de discussion peut aussi contenir des messages du service client, de la direction ou des messages automatiques de la Résidence (ils apparaissent comme messages de l'hôte). Tu ne les as pas écrits : ne parle pas à leur place, ne les contredis jamais, et en cas de doute transmets au Service Relation Client.
 `;
   if (!introduced) {
     r += `C'est ton PREMIER message dans cette conversation : commence par te présenter en une phrase (ex. "Bonjour, je suis l'assistant virtuel de la Résidence de l'Industrie."), puis réponds à la demande. Termine ton message par cette signature, seule sur sa ligne : ${SIGNATURE}`;
@@ -329,24 +384,29 @@ Si le voyageur demande un code, dit qu'il est bloqué ou affirme avoir une rése
 - Le système vérifie automatiquement dès que ces informations sont écrites dans la conversation : tu ne vérifies rien toi-même. Ne dis JAMAIS si une réservation existe ou non à tel nom, et ne répète jamais le nom, l'email ou les dates comme "introuvables" ou "non reconnus".
 - Ne redemande JAMAIS une information déjà donnée (nom, prénom, dates, logement, email). Ne demande pas de confirmer ce que le voyageur vient de dire. Si un seul mot est donné (ex. "Karim") sans autre précision, demande une seule fois s'il s'agit du nom de famille ou du prénom.
 - N'invite JAMAIS le voyageur à essayer plusieurs adresses email ni à en deviner une : demande l'email de la réservation une seule fois, et seulement s'il le connaît.
-- Si les informations données ne suffisent pas : écris "Je ne parviens pas à confirmer votre identité automatiquement" (sans dire ce qui ne correspond pas), dis une seule fois que le propriétaire est prévenu et le recontactera personnellement sur ce numéro WhatsApp, et invite le voyageur à rester joignable. Aucune nouvelle demande d'email ensuite.
+- Si les informations données ne suffisent pas : écris "Je ne parviens pas à confirmer votre identité automatiquement" (sans dire ce qui ne correspond pas), dis une seule fois que le Service Relation Client est prévenu et le recontactera personnellement sur ce numéro WhatsApp, et invite le voyageur à rester joignable. Aucune nouvelle demande d'email ensuite.
 - Voyageur bloqué dehors : reste bref et rassurant, sans répéter les mêmes phrases ; mentionne le 112 une seule fois, uniquement en cas de danger.
 Un voyageur qui n'a pas encore de réservation peut simplement réserver (voir SITE INTERNET).`;
 
 const RULES_WHATSAPP_LOCKED = `
-La vérification automatique de ce numéro est BLOQUÉE (trop de tentatives). Ne demande plus AUCUNE information d'identité (ni nom, ni email, ni dates). Dis une seule fois que le propriétaire est prévenu et reviendra personnellement vers le voyageur sur ce numéro, puis réponds brièvement sans rien communiquer de confidentiel.`;
+La vérification automatique de ce numéro est BLOQUÉE (trop de tentatives). Ne demande plus AUCUNE information d'identité (ni nom, ni email, ni dates). Dis une seule fois que le Service Relation Client est prévenu et reviendra personnellement vers le voyageur sur ce numéro, puis réponds brièvement sans rien communiquer de confidentiel.`;
 
 const EMERGENCY_WITH_BOOKING = `En cas de panne, incident technique, dégât des eaux, impossibilité d'accéder au logement ou plainte grave signalés par le voyageur, donner ce numéro : 06 62 52 43 81. S'excuser et assurer une intervention rapide. Ne donner ce numéro QUE si un incident réel est signalé.`;
 
-const EMERGENCY_WITHOUT_BOOKING = `NE PAS donner le numéro d'urgence 06 62 52 43 81. NE PAS donner l'adresse email. En cas de problème urgent, invite le visiteur à écrire au propriétaire via la plateforme où il a réservé (c'est l'une des exceptions prévues à la règle fondamentale) ; danger vital : 112.`;
+const EMERGENCY_WITHOUT_BOOKING = `NE PAS donner le numéro d'urgence 06 62 52 43 81. NE PAS donner l'adresse email. En cas de problème urgent, invite le visiteur à écrire au Service Relation Client via la plateforme où il a réservé (c'est l'une des exceptions prévues à la règle fondamentale) ; danger vital : 112.`;
 
-const EMERGENCY_WITHOUT_BOOKING_WHATSAPP = `NE PAS donner le numéro d'urgence 06 62 52 43 81. NE PAS donner l'adresse email. En cas de problème urgent, dis que le propriétaire est prévenu et reviendra vers le voyageur ; danger vital : 112.`;
+const EMERGENCY_WITHOUT_BOOKING_WHATSAPP = `NE PAS donner le numéro d'urgence 06 62 52 43 81. NE PAS donner l'adresse email. En cas de problème urgent, dis que le Service Relation Client est prévenu et reviendra vers le voyageur ; danger vital : 112.`;
 
-const SITE_RULE_LOYAL = `Ce voyageur a effectué 3 réservations ou plus. En FIN DE MESSAGE UNIQUEMENT, mentionner naturellement qu'il peut bénéficier d'un tarif préférentiel en réservant directement sur www.locations-residence-industrie.fr`;
+// Ancien voyageur : il peut se voir proposer un tarif préférentiel, MAIS seulement après validation de la Direction
+// (la demande passe d'abord par le Service Relation Client). Le bot ne cite jamais de tarif et n'en propose pas de lui-même.
+const SITE_RULE_LOYAL = `Ce voyageur est un ancien voyageur (plusieurs séjours). Ne propose de toi-même ni tarif, ni remise, ni réservation en direct. S'il demande un tarif préférentiel, une remise ou à réserver en direct : applique la conduite de la balise tarif_preferentiel (aucun chiffre, aucune promesse, sous réserve de validation par la Direction, demande transmise au Service Relation Client). Si une offre est validée, elle lui sera communiquée par le Service Relation Client ; la réservation en direct se fera alors sur ${SITE_URL}.`;
 
-const SITE_RULE_DEFAULT = `NE PAS mentionner le site internet www.locations-residence-industrie.fr`;
+const SITE_RULE_DEFAULT = `NE PAS mentionner le site internet www.locations-residence-industrie.fr. Pour réserver, oriente vers Airbnb ou Booking. Ne parle d'aucun tarif préférentiel ni d'aucune remise.`;
 
-const SITE_RULE_WHATSAPP = `Le voyageur te contacte par WhatsApp : il n'est pas sur une plateforme de réservation. Quand il souhaite réserver ou demande les disponibilités, propose-lui TROIS façons de réserver, en citant le site internet en premier : (1) en direct sur ${SITE_URL} , (2) via Airbnb, (3) via Booking. Présente-les exactement comme indiqué dans PRÉSENTATION DES MOYENS DE RÉSERVATION. Ne mentionne le site que lorsque la réservation ou la disponibilité est le sujet de la conversation. Ne promets aucune réduction ni tarif particulier.`;
+const SITE_RULE_WHATSAPP = `Le voyageur te contacte par WhatsApp : il n'est pas sur une plateforme de réservation. Les échanges se font de préférence sur les plateformes : quand il souhaite réserver ou demande les disponibilités, propose-lui de réserver via Airbnb ou via Booking (présentation exacte dans PRÉSENTATION DES MOYENS DE RÉSERVATION, SANS la ligne du site internet) et invite-le à poursuivre les échanges sur la plateforme. Ne mentionne pas le site internet. S'il demande à réserver en direct, un meilleur tarif ou une remise : ne promets rien et transmets sa demande au Service Relation Client (balise long_sejour, ou tarif_preferentiel si c'est un ancien voyageur).`;
+
+const WEB_CHAT_RULE = `=== CHAT DU SITE INTERNET ===
+Le visiteur t'écrit depuis le chat du site internet de la Résidence : il n'est ni sur Airbnb ni sur Booking, et tu ne connais ni son nom ni son numéro tant qu'il n'est pas vérifié. Pour réserver, oriente-le vers Airbnb ou Booking (présentation des moyens de réservation, sans la ligne du site : il est déjà dessus). Pour la suite des échanges, une modification ou une prolongation de réservation, invite-le à passer par sa plateforme de réservation. Le Service Relation Client ne peut pas te répondre à travers ce chat : si tu lui transmets une demande, invite le visiteur à lui écrire sur WhatsApp${WHATSAPP_PUBLIC_NUMBER ? ` au ${WHATSAPP_PUBLIC_NUMBER}` : ''} pour être recontacté.`;
 
 // ==================== OUTILS DE BASE ====================
 
@@ -589,7 +649,7 @@ function beds24UnitSheet(propInfo) {
   return `Source : Beds24 (codes d'équipements, à traduire en français pour le voyageur).
 Équipements communs à tous les logements : ${common.join(', ') || 'aucun'}
 ${lines.join('\n')}
-Un équipement qui n'apparaît pas ici est INCONNU (pas forcément absent) : ne dis pas qu'il n'existe pas, dis que tu transmets la question au propriétaire (balise contact_humain).`;
+Un équipement qui n'apparaît pas ici est INCONNU (pas forcément absent) : ne dis pas qu'il n'existe pas, dis que tu transmets la question au Service Relation Client (balise contact_humain).`;
 }
 
 let propertyCache = null;
@@ -972,7 +1032,7 @@ ${airbnbLines}
 - Via Booking : ${BOOKING_URL}
 
 Adapte la liste à la situation, sans changer la présentation :
-- Garde uniquement les lignes autorisées par les règles de la plateforme et de la section SITE INTERNET (sur Airbnb : Airbnb seulement ; sur Booking : Booking seulement ; sur WhatsApp : les trois).
+- Garde uniquement les lignes autorisées par les règles de la plateforme et de la section SITE INTERNET (sur Airbnb : Airbnb seulement ; sur Booking : Booking seulement ; sur WhatsApp et sur le chat du site : Airbnb et Booking, sans la ligne du site).
 - Pour Airbnb, si la disponibilité a été vérifiée, ne garde que les logements libres.
 - Si un seul logement est concerné, une seule ligne Airbnb suffit.`;
 }
@@ -1038,7 +1098,7 @@ async function checkAvailability(arrival, departure, excludeBookingId = null) {
 
 const TOOLS = [{
   name: 'check_availability',
-  description: "Vérifie en temps réel quels logements de la Résidence sont libres ou occupés pour un séjour (nuit d'arrivée incluse, jour de départ exclu). À appeler dès que le voyageur a donné ou confirmé des dates d'arrivée et de départ pour une NOUVELLE réservation.",
+  description: "Vérifie en temps réel quels logements de la Résidence sont libres ou occupés pour un séjour (nuit d'arrivée incluse, jour de départ exclu). À appeler dès que le voyageur a donné ou confirmé des dates d'arrivée et de départ pour une NOUVELLE réservation, ou pour vérifier une PROLONGATION (du jour de départ actuel à la nouvelle date de départ).",
   input_schema: {
     type: 'object',
     properties: {
@@ -1080,13 +1140,13 @@ async function executeTool(name, input) {
 // Règles selon la plateforme réelle de la réservation (Beds24 : Airbnb / Booking / inconnue)
 function platformRules(platform) {
   if (platform === 'airbnb') return `=== PLATEFORME : AIRBNB ===
-Le voyageur t'écrit via Airbnb. Le tarif d'arrivée anticipée / départ tardif et le paiement à l'avance (Airbnb) s'appliquent. Pour les liens de réservation, ne donne que les liens Airbnb.`;
+Le voyageur t'écrit via Airbnb. Le tarif d'arrivée anticipée / départ tardif et le paiement à l'avance (Airbnb) s'appliquent. Pour les liens de réservation, ne donne que les liens Airbnb. Pour une prolongation, invite-le à modifier lui-même les dates de sa réservation dans Airbnb (voir PROLONGATION DE SÉJOUR).`;
   if (platform === 'booking') return `=== PLATEFORME : BOOKING ===
-Le voyageur t'écrit via Booking. Le tarif Airbnb d'arrivée anticipée / départ tardif ne s'applique PAS : dis que le tarif est à convenir avec le propriétaire et utilise la balise demande_horaire. Pour les liens de réservation, ne donne que le lien Booking.`;
+Le voyageur t'écrit via Booking. Le tarif Airbnb d'arrivée anticipée / départ tardif ne s'applique PAS : dis que le tarif est à convenir avec le Service Relation Client et utilise la balise demande_horaire. Pour les liens de réservation, ne donne que le lien Booking. Pour une prolongation, invite-le à modifier lui-même les dates de sa réservation depuis Booking (voir PROLONGATION DE SÉJOUR).`;
   if (platform === 'direct') return `=== PLATEFORME : RÉSERVATION DIRECTE (SITE) ===
-Le voyageur a réservé en direct sur le site de la Résidence. Le tarif Airbnb d'arrivée anticipée / départ tardif ne s'applique PAS : dis que le tarif est à convenir avec le propriétaire et utilise la balise demande_horaire. Ne donne pas de liens Airbnb ou Booking, sauf si le voyageur les demande.`;
+Le voyageur a réservé en direct sur le site de la Résidence. Le tarif Airbnb d'arrivée anticipée / départ tardif ne s'applique PAS : dis que le tarif est à convenir avec le Service Relation Client et utilise la balise demande_horaire. Ne donne pas de liens Airbnb ou Booking, sauf si le voyageur les demande. Pour une prolongation, il n'y a pas de plateforme : transmets sa demande au Service Relation Client (balise contact_humain).`;
   return `=== PLATEFORME : NON DÉTERMINÉE ===
-Tu ne sais pas si le voyageur écrit via Airbnb ou Booking. Pour une arrivée anticipée ou un départ tardif, ne cite AUCUN tarif : transmets la demande au propriétaire (balise demande_horaire). Ne donne de liens de réservation que si le voyageur les demande.`;
+Tu ne sais pas si le voyageur écrit via Airbnb ou Booking. Pour une arrivée anticipée ou un départ tardif, ne cite AUCUN tarif : transmets la demande au Service Relation Client (balise demande_horaire). Ne donne de liens de réservation que si le voyageur les demande.`;
 }
 
 // Séparateur entre la partie stable du prompt (mise en cache) et la partie variable
@@ -1101,6 +1161,7 @@ const STATIC_PROMPT = [
 
 function buildSystemPrompt({ propInfo = null, roomInfo = null, booking = null, isLoyal = false, channel = 'platform', linksSent = false, platform = null, locked = false, introduced = false } = {}) {
   const wa = channel === 'whatsapp';
+  const web = channel === 'web'; // chat du site internet
   const hasBooking = !!booking && !!propInfo;
 
   let prompt = BASE_DYNAMIC_PROMPT;
@@ -1109,9 +1170,8 @@ function buildSystemPrompt({ propInfo = null, roomInfo = null, booking = null, i
   prompt = fill(prompt, '{BOOKING_FORMAT}', bookingFormatRules());
   prompt = fill(prompt, '{IDENTITY_RULE}', identityRules(introduced));
 
-  // L'adresse exacte n'est donnée qu'à un voyageur vérifié sur WhatsApp, jamais sur les plateformes ni sur le chat web
-  prompt = fill(prompt, '{ADDRESS_RULE}',
-    !wa ? ADDRESS_RULE_PLATFORM : (hasBooking ? ADDRESS_RULE_VERIFIED : ADDRESS_RULE_UNVERIFIED));
+  // L'adresse exacte n'est jamais donnée (quel que soit le canal) : seulement "à 1 km de la gare routière"
+  prompt = fill(prompt, '{ADDRESS_RULE}', wa ? (hasBooking ? ADDRESS_RULE_WHATSAPP_VERIFIED : ADDRESS_RULE_WHATSAPP) : ADDRESS_RULE_PLATFORM);
 
   if (hasBooking) {
     let rules = RULES_WITH_BOOKING;
@@ -1125,12 +1185,13 @@ function buildSystemPrompt({ propInfo = null, roomInfo = null, booking = null, i
     prompt = fill(prompt, '{EMERGENCY_RULE}', wa ? EMERGENCY_WITHOUT_BOOKING_WHATSAPP : EMERGENCY_WITHOUT_BOOKING);
   }
 
-  prompt = fill(prompt, '{SITE_RULE}', wa ? SITE_RULE_WHATSAPP : (isLoyal ? SITE_RULE_LOYAL : SITE_RULE_DEFAULT));
+  prompt = fill(prompt, '{SITE_RULE}', (wa ? SITE_RULE_WHATSAPP : SITE_RULE_DEFAULT) + (isLoyal ? `\n${SITE_RULE_LOYAL}` : ''));
 
   const b24Sheet = beds24UnitSheet(propInfo);
   if (b24Sheet) prompt += `\n\n=== ÉQUIPEMENTS DES LOGEMENTS (Beds24) ===\n${b24Sheet}`;
 
   if (platform) prompt += `\n\n${platformRules(platform)}`;
+  if (web) prompt += `\n\n${WEB_CHAT_RULE}`;
 
   if (hasBooking && wa) {
     prompt += `\n\n=== VOYAGEUR VÉRIFIÉ (WhatsApp) ===
@@ -1170,9 +1231,10 @@ const ALERT_META = {
   urgence_acces: { icon: '🚨', label: 'URGENT – Accès / voyageur bloqué' },
   urgence_technique: { icon: '🚨', label: 'URGENT – Panne / incident' },
   plainte: { icon: '⚠️', label: 'Plainte (bruit, voisinage…)' },
-  contact_humain: { icon: '🙋', label: 'Demande à parler au propriétaire' },
+  contact_humain: { icon: '🙋', label: 'Demande à parler à un humain (Service Relation Client)' },
   demande_horaire: { icon: '⏰', label: 'Arrivée anticipée / départ tardif à confirmer' },
   long_sejour: { icon: '💼', label: 'Long séjour / demande de tarif' },
+  tarif_preferentiel: { icon: '🎁', label: 'Tarif préférentiel (ancien voyageur)', hint: 'Circuit : Service Relation Client → validation de la Direction avant toute proposition au voyageur.' },
   voyageur_verifie: { icon: '🔓', label: 'Voyageur vérifié automatiquement – codes accessibles' },
   erreur_ia: { icon: '❗', label: 'Erreur technique – message sans réponse' },
   message_non_texte: { icon: '📎', label: 'Message audio / image / document reçu' }
@@ -1185,7 +1247,7 @@ function fallbackCategory(userText) {
   if (/bloqu|(code|digicode|porte|cle|boite).{0,40}(marche pas|fonctionne pas|ne marche|ouvre pas|ouvre plus)|impossible (d'|de )?(entrer|rentrer|ouvrir)/.test(t)) return 'urgence_acces';
   if (/fuite|inond|degat des eaux|panne|plus (d'eau|de chauffage|d'electricite|de courant)|incendie|fumee|court-circuit/.test(t)) return 'urgence_technique';
   if (/\bbruit|tapage|voisin|insupportable/.test(t)) return 'plainte';
-  if (/proprietaire|responsable|parler a (quelqu'un|un humain|une personne)|un humain/.test(t)) return 'contact_humain';
+  if (/proprietaire|responsable|service (relation )?client|direction|parler a (quelqu'un|un humain|une personne)|un humain/.test(t)) return 'contact_humain';
   return 'aucune';
 }
 
@@ -1199,7 +1261,7 @@ function parseAlert(raw, userText) {
   // sinon la promesse faite au voyageur serait fausse.
   if (category === 'aucune') {
     const r = normalizeText(reply);
-    if (/proprietaire/.test(r) && /(transmets|transmis|previens|prevenu|alerte)/.test(r)) category = 'contact_humain';
+    if (/proprietaire|service relation client/.test(r) && /(transmets|transmis|previens|prevenu|alerte)/.test(r)) category = 'contact_humain';
   }
   return { reply, category };
 }
@@ -1265,6 +1327,7 @@ function formatOwnerAlert({ channel, contact, question, reply, category = 'aucun
     text += `\nVoyageur : non vérifié${profileName ? ` (profil WhatsApp : ${profileName})` : ''}`;
   }
   if (locked) text += '\n🔒 Vérification automatique bloquée (trop de tentatives)';
+  if (meta && meta.hint) text += `\n${meta.hint}`;
   if (note) text += `\n${note}`;
   text += `\n\nMessage : ${String(question).substring(0, 800)}\n\nRéponse envoyée : ${String(reply).substring(0, 1200)}`;
   return { shortRef, text };
@@ -1311,9 +1374,11 @@ async function notifyOwner({ channel, contact, question, reply, category = 'aucu
           msg += '\n\nAucune réservation active ne correspond. Si vous reconnaissez le voyageur : /valider bIDRÉSERVATION ' + contactDigits;
         }
       }
-      msg += `\n\nPour couper le bot sur cette conversation : /pause ${contactDigits}`;
+      msg += `\n\nPour répondre vous-même au voyageur : /repondre ${contactDigits} votre message`;
+      msg += `\nPour couper le bot sur cette conversation : /pause ${contactDigits}`;
     } else if (String(channel).startsWith('Beds24') && bookingId) {
-      msg += `\n\nPour couper le bot sur cette réservation : /pause b${bookingId}`;
+      msg += `\n\nPour répondre vous-même au voyageur : /repondre b${bookingId} votre message`;
+      msg += `\nPour couper le bot sur cette réservation : /pause b${bookingId}`;
     }
 
     const ok = await sendOwnerAlert(msg.substring(0, 4000));
@@ -1704,17 +1769,142 @@ function pauseLabel(key) {
   return String(key).startsWith('b') ? `la réservation ${String(key).slice(1)}` : `+${key}`;
 }
 
+// ----- Commandes propriétaire : aide, statut, réponse -----
+
+function ownerHelpText() {
+  return [
+    "📖 *COMMANDES DE L'ASSISTANT*",
+    "_À envoyer depuis votre numéro._",
+    "",
+    "*Cible* = un numéro WhatsApp (ex. 33612345678) ou une réservation Airbnb/Booking (ex. b95878640). Sans cible, la commande vise la dernière conversation qui vous a été signalée.",
+    "",
+    "💬 *RÉPONDRE À UN VOYAGEUR*",
+    "*/repondre [cible] votre message*",
+    "→ Envoie VOTRE message au voyageur, en cas de réelle nécessité (le bot ne rédige rien). WhatsApp : possible si le voyageur a écrit dans les dernières 24 h. Airbnb/Booking : envoyé comme message de l'hôte. Le chat du site n'est pas joignable : le visiteur est invité à vous écrire sur WhatsApp.",
+    "Ex : /repondre b95878640 Bonjour, votre demande est acceptée.",
+    "",
+    "⏸️ *REPRENDRE LA MAIN*",
+    "*/pause [cible] [heures]*",
+    `→ Le bot se tait sur cette conversation (par défaut ${PAUSE_HOURS} h).`,
+    "Ex : /pause 33612345678 3",
+    "*/reprise [cible]*",
+    "→ Le bot reprend tout de suite.",
+    "",
+    "🔓 *IDENTITÉ DES VOYAGEURS (WhatsApp)*",
+    "*/valider bRÉSERVATION [numéro]*",
+    "→ Confirme à la main l'identité d'un voyageur : le bot lui envoie ses informations d'accès.",
+    "Ex : /valider b95878640 33612345678",
+    "*/debloquer [numéro]*",
+    "→ Lève le blocage d'un numéro après trop de tentatives d'identification ratées.",
+    "",
+    "📊 *SUIVI*",
+    "*/statut*",
+    "→ État du bot : conversations en pause, numéros bloqués, voyageurs reconnus, réglages actifs.",
+    "*/aide*",
+    "→ Affiche ce message."
+  ].join('\n');
+}
+
+function fmtParisShort(ts) {
+  return new Date(ts).toLocaleString('fr-FR', { timeZone: 'Europe/Paris', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+}
+
+function fmtUptime(ms) {
+  const min = Math.max(Math.floor(ms / 60000), 0);
+  const d = Math.floor(min / 1440), h = Math.floor((min % 1440) / 60), m = min % 60;
+  if (d) return `${d} j ${h} h`;
+  if (h) return `${h} h ${String(m).padStart(2, '0')} min`;
+  return `${m} min`;
+}
+
+function ownerStatusText() {
+  const cap = (arr, fn, max = 10) => arr.slice(0, max).map(fn).concat(arr.length > max ? [`… et ${arr.length - max} autre(s)`] : []);
+  const paused = [...pauses.entries()].filter(([n]) => isPaused(n));
+  const locked = [...conversations.entries()].filter(([, c]) => isLocked(c));
+  const verified = [...conversations.entries()].filter(([, c]) => c.verifiedBookingId);
+  const onOff = v => (v ? 'activé' : 'désactivé');
+
+  const out = [
+    "📊 *STATUT DE L'ASSISTANT*",
+    '',
+    `🟢 *Bot en ligne* depuis le ${fmtParisShort(AGENT_START_TIME)} (${fmtUptime(Date.now() - AGENT_START_TIME.getTime())})`,
+    '_Il répond seul aux voyageurs : WhatsApp, Airbnb, Booking et chat du site._',
+    '',
+    `⏸️ *Conversations en pause : ${paused.length}*`,
+    '_Sur ces conversations le bot se tait : vous avez la main._'
+  ];
+  if (paused.length) out.push(...cap(paused, ([n, until]) => `- ${pauseLabel(n)}, jusqu'au ${fmtParisShort(until)} → /reprise ${n}`));
+  else out.push('Aucune : le bot répond partout.');
+
+  out.push('', `🔒 *Numéros bloqués : ${locked.length}*`, "_Trop de tentatives d'identification ratées : le bot ne donne plus de codes à ces numéros._");
+  if (locked.length) out.push(...cap(locked, ([n]) => `- +${n} → /debloquer ${n}`));
+  else out.push('Aucun.');
+
+  out.push('', `✅ *Voyageurs WhatsApp reconnus : ${verified.length}*`, '_Identité confirmée (automatiquement ou par /valider) : ils ont accès aux codes pendant leur séjour._');
+
+  out.push('', '🔔 *Dernière conversation signalée*', '_C\'est la cible par défaut de /pause, /reprise et /repondre quand vous n\'indiquez pas de numéro._');
+  out.push(lastNotified ? `${pauseLabel(lastNotified)} → /repondre ${lastNotified} votre message` : 'Aucune depuis le démarrage.');
+
+  out.push('', '⚙️ *Réglages actifs*',
+    `- Durée de pause par défaut : ${PAUSE_HOURS} h`,
+    `- Vérification du séjour (nom + dates + logement) : ${onOff(STAY_VERIFICATION)}`,
+    `- Email exigé si la réservation en contient un vrai : ${REQUIRE_EMAIL ? 'oui' : 'non'}`,
+    `- Surveillance des demandes en attente : ${onOff(PENDING_WATCH)}`,
+    `- Accusé de réception automatique des demandes : ${onOff(PENDING_ACK)}`,
+    `- Mode test propriétaire : ${onOff(OWNER_TEST_MODE)}`,
+    '',
+    '_Envoyez /aide pour la liste des commandes._');
+  return out.join('\n');
+}
+
+// Garde la trace du message envoyé à la main, pour que le bot ne le contredise pas dans la suite de la conversation WhatsApp
+function addOwnerReplyToHistory(phone, text) {
+  const conv = conversations.get(phone);
+  if (!conv || !conv.messages.length) return;
+  const note = `[Message envoyé par le Service Relation Client] ${text}`.substring(0, 1500);
+  const last = conv.messages[conv.messages.length - 1];
+  if (last.role === 'assistant') last.content = `${last.content}\n\n${note}`;
+  else conv.messages.push({ role: 'assistant', content: note });
+  conv.updated = Date.now();
+}
+
 async function handleOwnerCommand(text) {
   const owner = getOwnerNumber();
   const say = m => sendWhatsAppReply(owner, m);
   const [cmdRaw, ...args] = text.trim().split(/\s+/);
-  const cmd = cmdRaw.toLowerCase();
+  const cmd = normalizeText(cmdRaw); // "/Répondre" = "/repondre"
   const bArg = args.find(a => /^b\d{4,}$/i.test(a));
   const numArg = args.find(a => a !== bArg && a.replace(/\D/g, '').length >= 9);
   const target = bArg ? bArg.toLowerCase() : (numArg ? normalizeWaNumber(numArg) : lastNotified);
   const hoursArg = args.find(a => a !== numArg && a !== bArg && /^\d{1,3}h?$/i.test(a));
   const hours = hoursArg ? parseInt(hoursArg, 10) : PAUSE_HOURS;
 
+  if (cmd === '/repondre') {
+    // Format : /repondre [numéro|bIDRÉSERVATION] message (sans cible : dernière conversation signalée)
+    const rest = text.trim().slice(cmdRaw.length).trim();
+    const first = rest.split(/\s+/)[0] || '';
+    let tgt = lastNotified;
+    let body = rest;
+    if (/^b\d{4,}$/i.test(first)) { tgt = first.toLowerCase(); body = rest.slice(first.length).trim(); }
+    else if (/^\+?\d{9,15}$/.test(first)) { tgt = normalizeWaNumber(first); body = rest.slice(first.length).trim(); }
+    if (!body) return say('Usage : /repondre [numéro ou bIDRÉSERVATION] votre message\nExemple : /repondre b95878640 Bonjour, ...\nSans numéro, le message part à la dernière conversation signalée.');
+    if (!tgt) return say("Aucune conversation récente : précisez le destinataire.\nExemple : /repondre 33612345678 votre message (ou /repondre b95878640 votre message)");
+    if (body.length > 3500) return say(`Message trop long (${body.length} caractères, maximum 3500). Raccourcissez-le.`);
+    const finalText = OWNER_REPLY_SIGNATURE ? `${body}\n\n${OWNER_REPLY_SIGNATURE}` : body;
+    const preview = body.length > 200 ? `${body.slice(0, 200)}…` : body;
+
+    if (tgt.startsWith('b')) {
+      const bookingId = tgt.slice(1);
+      const token = await getBeds24Token();
+      const ok = token ? await sendBeds24Message(token, bookingId, finalText) : false;
+      if (!ok) return say(`❌ Message NON envoyé à la réservation ${bookingId} (Beds24 indisponible ou refus). Répondez directement dans Airbnb / Booking.`);
+      return say(`✅ Message envoyé sur la réservation ${bookingId} (Airbnb / Booking) :\n« ${preview} »\n\nLe bot reste actif sur ce fil. Pour le couper : /pause ${tgt}`);
+    }
+    const ok = await sendWhatsAppReply(tgt, finalText);
+    if (!ok) return say(`❌ Message NON envoyé à +${tgt}.\nWhatsApp n'autorise un message libre que si le voyageur a écrit dans les dernières 24 h. Sinon, joignez-le directement (appel ou plateforme).`);
+    addOwnerReplyToHistory(tgt, body);
+    return say(`✅ Message envoyé à +${tgt} :\n« ${preview} »\n\nLe bot reste actif sur cette conversation. Pour le couper : /pause ${tgt}`);
+  }
   if (cmd === '/pause') {
     if (!target) return say('Précisez le numéro : /pause 336XXXXXXXX [heures] (ou /pause b95878640 pour une réservation Airbnb/Booking)');
     pauseConversation(target, hours);
@@ -1752,12 +1942,9 @@ async function handleOwnerCommand(text) {
     markDirty();
     return say(`🔓 Vérification automatique de +${phone} débloquée.`);
   }
-  if (cmd === '/statut') {
-    const list = [...pauses.entries()].filter(([n]) => isPaused(n))
-      .map(([n, until]) => `- ${pauseLabel(n)} (jusqu'à ${new Date(until).toLocaleString('fr-FR', { timeZone: 'Europe/Paris' })})`);
-    return say(list.length ? `Conversations en pause :\n${list.join('\n')}` : 'Aucune conversation en pause.');
-  }
-  return say('Commandes :\n/pause [numéro ou bIDRÉSERVATION] [heures] : le bot se tait (sans argument : dernière alerte)\n/reprise [numéro ou bIDRÉSERVATION] : le bot reprend\n/valider bIDRÉSERVATION [numéro] : confirme un voyageur WhatsApp et lui envoie ses accès\n/debloquer [numéro] : lève le blocage de la vérification automatique\n/statut : conversations en pause');
+  if (cmd === '/statut') return say(ownerStatusText());
+  if (cmd === '/aide') return say(ownerHelpText());
+  return say(`Commande inconnue : ${cmdRaw}\n\n${ownerHelpText()}`);
 }
 
 async function handleWhatsAppMessage(message) {
@@ -1771,7 +1958,7 @@ async function handleWhatsAppMessage(message) {
     const last = lastNonTextReply.get(from) || 0;
     if (Date.now() - last > 10 * 60 * 1000) {
       lastNonTextReply.set(from, Date.now());
-      await sendWhatsAppReply(from, "Merci pour votre message. Je ne peux lire que le texte : pourriez-vous l'écrire en quelques mots ? Je transmets aussi votre envoi au propriétaire.");
+      await sendWhatsAppReply(from, "Merci pour votre message. Je ne peux lire que le texte : pourriez-vous l'écrire en quelques mots ? Je transmets aussi votre envoi au Service Relation Client.");
     }
     await notifyOwner({ channel: 'WhatsApp', contact: from, question: `[${message.type}]`, reply: 'Réponse automatique : demande de message écrit', category: 'message_non_texte', profileName: message._profileName });
     return;
@@ -1842,7 +2029,8 @@ async function handleWhatsAppMessage(message) {
       note: `Vérifié par : ${(conv.verifiedReasons || []).join(', ') || '?'}\nNuméro WhatsApp = numéro de la réservation : ${sameNumber}` });
   }
 
-  const systemPrompt = buildSystemPrompt({ propInfo, roomInfo, booking, isLoyal: false, channel: 'whatsapp', linksSent: conv.linksSent, locked: isLocked(conv), introduced });
+  const isLoyal = verified ? (await countGuestBookings(booking.email || null)) >= FORMER_GUEST_MIN_BOOKINGS : false;
+  const systemPrompt = buildSystemPrompt({ propInfo, roomInfo, booking, isLoyal, channel: 'whatsapp', linksSent: conv.linksSent, locked: isLocked(conv), introduced });
 
   console.log('➡️ Appel Claude...');
   const raw = await generateAIReply(text, systemPrompt, history);
@@ -1851,7 +2039,7 @@ async function handleWhatsAppMessage(message) {
   console.log('⬅️ Réponse Claude:', parsed ? logText(parsed.reply, 60) : 'AUCUNE', '| alerte:', parsed ? parsed.category : '-');
 
   if (!parsed || !parsed.reply) {
-    const msg = 'Désolé, je rencontre un souci technique momentané. Je transmets votre message au propriétaire, qui vous répondra dès que possible.';
+    const msg = 'Désolé, je rencontre un souci technique momentané. Je transmets votre message au Service Relation Client, qui vous répondra dès que possible.';
     await sendWhatsAppReply(from, msg);
     await notifyOwner({ channel: 'WhatsApp', contact: from, question: text, reply: msg, category: 'erreur_ia', booking, profileName: message._profileName });
     return;
@@ -1866,7 +2054,7 @@ async function handleWhatsAppMessage(message) {
   if (notified === false && parsed.category !== 'aucune' && Date.now() - (conv.notifyFailAt || 0) > 30 * 60 * 1000) {
     conv.notifyFailAt = Date.now();
     console.error('❗ Alerte propriétaire NON envoyée alors que le voyageur a été informé');
-    await sendWhatsAppReply(from, "Je n'ai pas réussi à prévenir le propriétaire automatiquement pour le moment. Vous pouvez aussi lui écrire directement via la plateforme où vous avez réservé (Airbnb ou Booking) en précisant votre situation.");
+    await sendWhatsAppReply(from, "Je n'ai pas réussi à prévenir le Service Relation Client automatiquement pour le moment. Vous pouvez aussi lui écrire directement via la plateforme où vous avez réservé (Airbnb ou Booking) en précisant votre situation.");
   }
 }
 
@@ -2038,7 +2226,7 @@ async function handleBeds24Group(token, propInfo, bookingId, group, all) {
   const activeBooking = confirmed && isActiveStay(booking) ? booking : null;
   const platform = detectPlatform(booking);
   const roomInfo = activeBooking && propInfo ? propInfo.rooms.find(r => String(r.id) === String(activeBooking.roomId)) || null : null;
-  const isLoyal = (await countGuestBookings(booking?.email || null)) >= 3;
+  const isLoyal = (await countGuestBookings(booking?.email || null)) >= FORMER_GUEST_MIN_BOOKINGS;
   console.log(` Réservation: ${logName(booking)} | codes autorisés: ${!!activeBooking} | plateforme: ${platform} (channel: ${booking?.channel ?? '-'}) | fidèle: ${isLoyal} | historique: ${history.length} message(s)`);
 
   const introduced = introducedBookings.has(String(bookingId)) || hasIntro(history);
@@ -2263,7 +2451,7 @@ async function announceBooking(token, b, kind, propInfo) {
   console.log(ok ? '📩 Alerte envoyée' : '❌ Alerte NON envoyée', `| réservation ${b.id} | ${kind} | origine: ${detectPlatform(b)} | téléphone: ${bookingPhone(b) ? 'oui' : 'non'}`);
   const origin = detectPlatform(b);
   if (ok && PENDING_ACK && kind === 'pending' && (origin === 'airbnb' || origin === 'booking') && !isPaused(`b${b.id}`)) {
-    const msg = `Bonjour, je suis l'assistant virtuel de la Résidence de l'Industrie. Votre demande a bien été reçue et transmise au propriétaire, qui reviendra vers vous. Elle n'est pas encore confirmée.\n\n${SIGNATURE}`;
+    const msg = `Bonjour, je suis l'assistant virtuel de la Résidence de l'Industrie. Votre demande a bien été reçue et transmise au Service Relation Client, qui reviendra vers vous. Elle n'est pas encore confirmée.\n\n${SIGNATURE}`;
     if (await sendBeds24Message(token, b.id, msg)) { introducedBookings.set(String(b.id), Date.now()); markDirty(); }
   }
   return ok;
@@ -2600,9 +2788,9 @@ app.post('/api/chat', async (req, res) => {
     }
 
     const bookingCount = await countGuestBookings(activeBooking?.email || null);
-    const isLoyal = bookingCount >= 3;
+    const isLoyal = bookingCount >= FORMER_GUEST_MIN_BOOKINGS;
 
-    let systemPromptText = buildSystemPrompt({ propInfo, roomInfo, booking: activeBooking, isLoyal, channel: 'platform', introduced });
+    let systemPromptText = buildSystemPrompt({ propInfo, roomInfo, booking: activeBooking, isLoyal, channel: 'web', introduced });
 
     // Règle de sécurité absolue selon statut vérification
     if (!activeBooking) {
