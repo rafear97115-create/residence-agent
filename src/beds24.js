@@ -143,6 +143,25 @@ async function getAllActiveBookings() {
 }
 
 
+// Séjours en cours et à venir (arrivée dans les `days` prochains jours), pour la commande /sejour.
+// Seulement les réservations confirmées : ni demandes, ni annulations, ni blocages. null si Beds24 est injoignable.
+async function getStays(days = 30) {
+  try {
+    const token = await getBeds24Token();
+    if (!token) return null;
+    const today = parisToday();
+    const res = await fetchBeds24List(`bookings?departureFrom=${today}&arrivalTo=${addDays(today, days)}&maxResults=200`, token);
+    if (!res.ok || !Array.isArray(res.data)) return null;
+    return res.data
+      .filter(b => b && !isBlockBooking(b) && ['confirmed', 'new'].includes(String(b.status || '').toLowerCase()))
+      .filter(b => String(b.departure || '').slice(0, 10) >= today && String(b.arrival || '').slice(0, 10) <= addDays(today, days))
+      .sort((x, y) => String(x.arrival).localeCompare(String(y.arrival)) || String(x.roomId).localeCompare(String(y.roomId)));
+  } catch (err) {
+    console.error('Erreur getStays:', err.message);
+    return null;
+  }
+}
+
 // ---------- Anciens voyageurs ----------
 // Un voyageur est "ancien" à partir de FORMER_GUEST_MIN_BOOKINGS séjours. Règles de comptage (maîtrisées) :
 // - adresse email EXACTE et réelle (pas d'adresse relais Airbnb/Booking : propre à une seule réservation) ;
@@ -315,6 +334,7 @@ module.exports = {
   getPropertyInfo,
   isActiveStay,
   getAllActiveBookings,
+  getStays,
   GUEST_COUNT_TTL_MS,
   guestCountCache,
   countsAsFormerStay,

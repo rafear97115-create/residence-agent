@@ -15,7 +15,7 @@ const { parisToday } = require('./utils');
 // ==================== DEMANDES EN ATTENTE ET RÉSERVATIONS DIRECTES (Beds24) ====================
 // Toutes les 2 minutes, le bot regarde les réservations récentes de Beds24 et prévient le propriétaire :
 // - d'une demande en attente (statut inquiry / request). Airbnb envoie aussi les simples questions sur les dates en "inquiry" ;
-// - d'une nouvelle réservation directe (site), pour avoir le numéro du voyageur et le joindre sur WhatsApp.
+// - d'une nouvelle réservation confirmée : directe (site) ou Airbnb / Booking (réservation instantanée, ou demande acceptée).
 // Le bot ne peut ni accepter ni refuser une demande : cela reste à faire dans Airbnb / Booking.
 
 
@@ -25,17 +25,21 @@ const DIRECT_STATUSES = ['confirmed', 'new'];
 const bookingEventAttempts = new Map();
 let watchingBookings = false;
 
-// 'pending' (demande en attente), 'direct' (nouvelle réservation du site) ou null (rien à signaler)
+// 'pending' (demande en attente), 'direct' (nouvelle réservation du site), 'confirmed' (nouvelle réservation Airbnb / Booking / origine inconnue)
+// ou null (rien à signaler)
 function bookingEventKind(b, sinceMs = 0) {
   if (isBlockBooking(b)) return null;
   const status = String(b?.status || '').toLowerCase();
   if (PENDING_STATUSES.includes(status)) return 'pending';
-  if (detectPlatform(b) === 'direct' && DIRECT_STATUSES.includes(status)) {
+  if (DIRECT_STATUSES.includes(status)) {
+    const kind = detectPlatform(b) === 'direct' ? 'direct' : 'confirmed';
+    // Une demande déjà signalée (pending) qui devient confirmée (demande acceptée) est signalée même si la demande date de plus de 12 h
+    if (kind === 'confirmed' && seenBookingEvents.has(`${b.id}:pending`)) return kind;
     // Réservation créée récemment seulement : modifier une ancienne fiche dans Beds24 ne doit pas relancer d'alerte
     const created = Date.parse(b.bookingTime || b.modifiedTime || '');
     // Aucune date exploitable : on alerte quand même (la liste est déjà limitée aux réservations modifiées récemment,
     // et l'anti-doublon conservé dans le fichier d'état empêche d'envoyer deux fois la même alerte)
-    if (Number.isNaN(created) || created >= sinceMs) return 'direct';
+    if (Number.isNaN(created) || created >= sinceMs) return kind;
   }
   return null;
 }
@@ -51,13 +55,15 @@ function formatBookingAlert(b, kind, propInfo, availability = null) {
 
   let t = kind === 'pending'
     ? '📩 Demande en attente (demande de réservation ou question sur les dates)'
-    : '🆕 Nouvelle réservation directe (site)';
+    : kind === 'confirmed'
+      ? `✅ Nouvelle réservation confirmée (${originLabel})`
+      : '🆕 Nouvelle réservation directe (site)';
   t += `\nPlate-forme (réservation) : ${originLabel} (${b.id})`;
   t += `\nVoyageur : ${nm || 'inconnu'}`;
   t += phone ? `\nTéléphone : +${phone}\nWhatsApp : https://wa.me/${phone}` : '\nTéléphone : non enregistré dans Beds24';
   t += `\nLogement : ${describeRoom(b.roomId, propInfo)}`;
   t += `\nSéjour : ${fmtDate(b.arrival)} au ${fmtDate(b.departure)}${Number.isFinite(nights) && nights > 0 ? ` (${nights} nuit${nights > 1 ? 's' : ''})` : ''}`;
-  if (kind === 'direct') t += `\nStatut Beds24 : ${b.status}`;
+  if (kind !== 'pending') t += `\nStatut Beds24 : ${b.status}`;
   const price = Number(b.price);
   if (price > 0) t += `\nPrix (Beds24) : ${price} €`;
 
@@ -77,8 +83,10 @@ function formatBookingAlert(b, kind, propInfo, availability = null) {
     t += origin === 'direct'
       ? `\n\nÀ confirmer avec le voyageur${phone ? ' sur WhatsApp' : ''}.`
       : `\n\nÀ traiter dans ${originLabel} : le bot ne peut ni accepter ni refuser la demande.`;
-  } else if (!phone) {
+  } else if (kind === 'direct' && !phone) {
     t += '\n\nPensez à demander son numéro au voyageur.';
+  } else if (kind === 'confirmed') {
+    t += `\n\nPour écrire au voyageur : /repondre b${b.id} votre message`;
   }
   return t;
 }

@@ -4,8 +4,8 @@
  */
 
 const { ADDRESS_FULL, ADDRESS_HINT, BOOKING_URL, LOCK_INSTRUCTIONS, LONG_STAY_POLICY, SITE_URL, WHATSAPP_PUBLIC_NUMBER } = require('./config');
-const { AIRBNB_LINKS, beds24UnitSheet } = require('./rooms');
-const { calendarHint, fill, getDatetime } = require('./utils');
+const { AIRBNB_LINKS, beds24UnitSheet, describeRoom } = require('./rooms');
+const { calendarHint, fill, getDatetime, parisToday } = require('./utils');
 
 // ==================== PROMPTS ====================
 
@@ -308,6 +308,35 @@ Le voyageur a réservé en direct sur le site de la Résidence. Le tarif Airbnb 
 Tu ne sais pas si le voyageur écrit via Airbnb ou Booking. Pour une arrivée anticipée ou un départ tardif, ne cite AUCUN tarif : transmets la demande au Service Relation Client (balise demande_horaire). Ne donne de liens de réservation que si le voyageur les demande.`;
 }
 
+// Réservation confirmée dont le séjour n'a pas commencé (ou est terminé) : le voyageur a DÉJÀ réservé.
+// Sans ce bloc, le bot le prenait pour un prospect et lui proposait de réserver. Aucun code n'est donné ici.
+function knownBookingRules(booking, propInfo, platform, today = parisToday()) {
+  const a = String(booking?.arrival || '').slice(0, 10);
+  const d = String(booking?.departure || '').slice(0, 10);
+  if (!a || !d) return '';
+  const day = x => new Date(x + 'T12:00:00Z').toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' });
+  const nights = Math.round((new Date(d + 'T00:00:00Z') - new Date(a + 'T00:00:00Z')) / 86400000);
+  const name = `${booking.firstName || ''} ${booking.lastName || ''}`.trim();
+  const origin = { airbnb: 'Airbnb', booking: 'Booking', direct: 'le site de la Résidence' }[platform] || 'la plateforme de réservation';
+  const facts = `- Voyageur : ${name || 'inconnu'}
+- Logement : ${describeRoom(booking.roomId, propInfo)}
+- Séjour : du ${day(a)} au ${day(d)}${nights > 0 ? ` (${nights} nuit${nights > 1 ? 's' : ''})` : ''}
+- Réservé via : ${origin}`;
+  if (d < today) {
+    return `=== RÉSERVATION DU VOYAGEUR (séjour terminé) ===
+Ce voyageur a déjà séjourné chez nous :
+${facts}
+Ne lui propose pas de réserver et ne donne aucun lien de réservation, sauf s'il demande lui-même à revenir. Remercie-le de son séjour s'il y a lieu. Ne donne AUCUN code d'accès.`;
+  }
+  return `=== RÉSERVATION DU VOYAGEUR (confirmée, séjour à venir) ===
+Ce voyageur a DÉJÀ une réservation confirmée :
+${facts}
+- Il n'a PAS besoin de réserver : ne lui propose JAMAIS de réserver, ne donne AUCUN lien de réservation et ne lui propose pas de vérifier des disponibilités, sauf s'il demande lui-même une AUTRE réservation (autre logement, autres dates).
+- S'il te salue ou écrit sans question précise (ex. "Bonjour"), réponds à son salut, confirme en une phrase que sa réservation est bien enregistrée (logement et dates), puis demande comment tu peux l'aider.
+- Les informations d'accès (digicode, boîte à clé, Wi-Fi) et les consignes d'arrivée sont envoyées avant l'arrivée, via la plateforme : ne les donne pas ici, explique simplement qu'elles lui seront transmises avant son séjour.
+- Pour modifier les dates ou annuler, il passe par ${origin}.`;
+}
+
 // Séparateur entre la partie stable du prompt (mise en cache) et la partie variable
 const CACHE_BREAK = '\n\n<<<CACHE_BREAK>>>\n\n';
 
@@ -318,7 +347,7 @@ const STATIC_PROMPT = [
   LOCK_INSTRUCTIONS.trim() ? `=== SERRURE / DIGICODE (fonctionnement) ===\n${LOCK_INSTRUCTIONS.trim()}` : ''
 ].filter(Boolean).join('\n\n');
 
-function buildSystemPrompt({ propInfo = null, roomInfo = null, booking = null, isLoyal = false, channel = 'platform', linksSent = false, platform = null, locked = false, introduced = false } = {}) {
+function buildSystemPrompt({ propInfo = null, roomInfo = null, booking = null, isLoyal = false, channel = 'platform', linksSent = false, platform = null, locked = false, introduced = false, knownBooking = null } = {}) {
   const wa = channel === 'whatsapp';
   const web = channel === 'web'; // chat du site internet
   const hasBooking = !!booking && !!propInfo;
@@ -354,6 +383,7 @@ function buildSystemPrompt({ propInfo = null, roomInfo = null, booking = null, i
 
   if (platform) prompt += `\n\n${platformRules(platform)}`;
   if (web) prompt += `\n\n${WEB_CHAT_RULE}`;
+  if (knownBooking && !hasBooking && !wa && !web) prompt += `\n\n${knownBookingRules(knownBooking, propInfo, platform)}`;
 
   if (hasBooking && wa) {
     prompt += `\n\n=== VOYAGEUR VÉRIFIÉ (WhatsApp) ===
@@ -423,6 +453,7 @@ module.exports = {
   bookingFormatRules,
   availabilityRules,
   platformRules,
+  knownBookingRules,
   CACHE_BREAK,
   STATIC_PROMPT,
   buildSystemPrompt,

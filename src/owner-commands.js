@@ -4,11 +4,12 @@
  */
 
 const { ownerCtx } = require('./alerts');
-const { getBeds24Token, getBookingById, sendBeds24Message } = require('./beds24');
+const { bookingPhone, detectPlatform, getBeds24Token, getBookingById, getPropertyInfo, getStays, sendBeds24Message } = require('./beds24');
 const { AGENT_START_TIME, OWNER_REPLY_SIGNATURE, OWNER_TEST_MODE, PAUSE_HOURS, PENDING_ACK, PENDING_WATCH, REQUIRE_EMAIL, STAY_VERIFICATION } = require('./config');
 const { getOwnerNumber, sendWhatsAppReply } = require('./messaging');
+const { describeRoom } = require('./rooms');
 const { conversations, ensureConv, isLocked, isPaused, markDirty, pauseConversation, pauses, resumeConversation, runSerial } = require('./state');
-const { normalizeText, normalizeWaNumber } = require('./utils');
+const { normalizeText, normalizeWaNumber, parisToday } = require('./utils');
 
 function pauseLabel(key) {
   return String(key).startsWith('b') ? `la réservation ${String(key).slice(1)}` : `+${key}`;
@@ -43,6 +44,9 @@ function ownerHelpText() {
     "→ Lève le blocage d'un numéro après trop de tentatives d'identification ratées.",
     "",
     "📊 *SUIVI*",
+    "*/sejour [jours]*",
+    "→ Les séjours en cours et à venir (30 jours par défaut, 365 au maximum) : logement, voyageur, plateforme, dates, numéro de réservation.",
+    "Ex : /sejour 60",
     "*/statut*",
     "→ État du bot : conversations en pause, numéros bloqués, voyageurs reconnus, réglages actifs.",
     "*/aide*",
@@ -99,6 +103,68 @@ function ownerStatusText() {
     `- Mode test propriétaire : ${onOff(OWNER_TEST_MODE)}`,
     '',
     '_Envoyez /aide pour la liste des commandes._');
+  return out.join('\n');
+}
+
+// ----- /sejour : séjours en cours et à venir -----
+
+const SEJOUR_DEFAULT_DAYS = 30;
+const SEJOUR_MAX_DAYS = 365;
+
+function dayDiff(a, b) {
+  return Math.round((new Date(b + 'T00:00:00Z') - new Date(a + 'T00:00:00Z')) / 86400000);
+}
+function fmtDM(d) {
+  const m = String(d || '').match(/^\d{4}-(\d{2})-(\d{2})/);
+  return m ? `${m[2]}/${m[1]}` : '?';
+}
+function plural(n, w) { return `${n} ${w}${n > 1 ? 's' : ''}`; }
+
+function stayLine(b, propInfo, today) {
+  const a = String(b.arrival || '').slice(0, 10);
+  const d = String(b.departure || '').slice(0, 10);
+  const nights = dayDiff(a, d);
+  const nm = `${b.firstName || ''} ${b.lastName || ''}`.trim() || 'voyageur inconnu';
+  const origin = { airbnb: 'Airbnb', booking: 'Booking', direct: 'Site' }[detectPlatform(b)] || 'Origine ?';
+  let when;
+  if (a <= today) {
+    const left = dayDiff(today, d);
+    when = left <= 0 ? "part aujourd'hui" : left === 1 ? 'part demain' : `part dans ${left} j`;
+    if (a === today) when = "arrive aujourd'hui, " + when;
+  } else {
+    const wait = dayDiff(today, a);
+    when = wait === 1 ? 'arrive demain' : `arrive dans ${wait} j`;
+  }
+  const phone = bookingPhone(b);
+  return `- *${describeRoom(b.roomId, propInfo)}* · ${nm} · ${origin}\n  ${fmtDM(a)} → ${fmtDM(d)}${nights > 0 ? ` (${plural(nights, 'nuit')})` : ''} · ${when}\n  b${b.id}${phone ? ` · +${phone}` : ''}`;
+}
+
+async function ownerStaysText(days = SEJOUR_DEFAULT_DAYS) {
+  const stays = await getStays(days);
+  if (!stays) return '❌ Impossible de lire les réservations dans Beds24 pour le moment. Réessayez dans quelques minutes.';
+  const today = parisToday();
+  const propInfo = await getPropertyInfo();
+  const current = stays.filter(b => String(b.arrival).slice(0, 10) <= today);
+  const upcoming = stays.filter(b => String(b.arrival).slice(0, 10) > today);
+
+  const out = ['🏠 *SÉJOURS*', ''];
+  let size = out.join('\n').length;
+  const MAX = 3600; // WhatsApp coupe à 4000 caractères
+  const section = (title, list, empty) => {
+    out.push(`*${title} : ${list.length}*`);
+    if (!list.length) { out.push(empty); out.push(''); return; }
+    let shown = 0;
+    for (const b of list) {
+      const line = stayLine(b, propInfo, today);
+      if (size + line.length > MAX) break;
+      out.push(line); size += line.length + 1; shown++;
+    }
+    if (shown < list.length) out.push(`… et ${list.length - shown} autre(s) : réduisez la période (ex. /sejour 14)`);
+    out.push('');
+  };
+  section('En cours', current, 'Aucun séjour en cours.');
+  section(`À venir (${days} prochains jours)`, upcoming, 'Aucune arrivée prévue sur cette période.');
+  out.push('_/sejour 60 pour regarder plus loin (365 jours maximum). Écrire à un voyageur : /repondre bNUMÉRO votre message._');
   return out.join('\n');
 }
 
@@ -187,6 +253,11 @@ async function handleOwnerCommand(text) {
     markDirty();
     return say(`🔓 Vérification automatique de +${phone} débloquée.`);
   }
+  if (cmd === '/sejour' || cmd === '/sejours') {
+    const daysArg = args.map(a => a.match(/^(\d{1,3})\s*j?$/i)).find(Boolean);
+    const days = daysArg ? Math.min(Math.max(parseInt(daysArg[1], 10), 1), SEJOUR_MAX_DAYS) : SEJOUR_DEFAULT_DAYS;
+    return say(await ownerStaysText(days));
+  }
   if (cmd === '/statut') return say(ownerStatusText());
   if (cmd === '/aide') return say(ownerHelpText());
   return say(`Commande inconnue : ${cmdRaw}\n\n${ownerHelpText()}`);
@@ -198,6 +269,8 @@ module.exports = {
   fmtParisShort,
   fmtUptime,
   ownerStatusText,
+  ownerStaysText,
+  stayLine,
   addOwnerReplyToHistory,
   handleOwnerCommand
 };

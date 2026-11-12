@@ -105,12 +105,14 @@ async function handleBeds24Group(token, propInfo, bookingId, group, all) {
   const confirmed = booking && String(booking.status || '').toLowerCase() === 'confirmed';
   const activeBooking = confirmed && isActiveStay(booking) ? booking : null;
   const platform = detectPlatform(booking);
+  // Réservation confirmée mais séjour pas encore commencé (ou déjà terminé) : le bot la connaît, sans donner aucun code
+  const knownBooking = confirmed && !activeBooking ? booking : null;
   const roomInfo = activeBooking && propInfo ? propInfo.rooms.find(r => String(r.id) === String(activeBooking.roomId)) || null : null;
   const isLoyal = (await countGuestBookings(booking?.email || null)) >= FORMER_GUEST_MIN_BOOKINGS;
   console.log(` Réservation: ${logName(booking)} | codes autorisés: ${!!activeBooking} | plateforme: ${platform} (channel: ${booking?.channel ?? '-'}) | fidèle: ${isLoyal} | historique: ${history.length} message(s)`);
 
   const introduced = introducedBookings.has(String(bookingId)) || hasIntro(history);
-  const systemPrompt = buildSystemPrompt({ propInfo, roomInfo, booking: activeBooking, isLoyal, channel: 'platform', platform, introduced });
+  const systemPrompt = buildSystemPrompt({ propInfo, roomInfo, booking: activeBooking, isLoyal, channel: 'platform', platform, introduced, knownBooking });
   const rawReply = await runConversation({ system: systemPrompt, messages: mergeRoles([...history, { role: 'user', content: combined }]) });
   const parsed = rawReply ? parseAlert(rawReply, combined) : null;
   if (parsed) parsed.reply = ensureSignature(applyAddressPolicy(parsed.reply, false), introduced); // jamais l'adresse exacte sur les plateformes
