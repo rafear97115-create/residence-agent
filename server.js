@@ -38,7 +38,12 @@
  *   Airbnb/Booking), le voyageur doit la donner en plus d'un autre critère (WhatsApp et chat web)
  * - LOCK_DAYS (optionnel, défaut 90) : durée du blocage de la vérification automatique d'un numéro après trop de tentatives ratées.
  *   Le blocage survit au redémarrage (fichier d'état) ; /valider ou /debloquer le lèvent avant
- * - CHAT_DAILY_LIMIT (optionnel, défaut 1000) : nombre maximum de requêtes /api/chat par 24 h, tous visiteurs confondus (coût IA)
+ * - CHAT_DAILY_LIMIT (optionnel, défaut 1000) : nombre maximum de requêtes /api/chat par 24 h, tous visiteurs confondus (coût IA).
+ *   Le propriétaire est alerté (une fois par jour) quand il est atteint.
+ * - CHAT_IP_DAILY_LIMIT (optionnel, défaut 100) : nombre maximum de requêtes /api/chat par 24 h et par adresse IP,
+ *   pour qu'une seule connexion ne puisse pas épuiser le plafond global
+ *   Le chat du site ne donne JAMAIS de codes d'accès (digicode, boîte à clé, Wi-Fi) ni de numéro d'urgence : tout passe par WhatsApp.
+ *   /api/chat refuse aussi les requêtes dont l'en-tête Origin n'est pas dans CORS_ORIGIN (ou sans Origin).
  * - OWNER_REPLY_SIGNATURE (optionnel) : signature ajoutée aux messages envoyés avec /repondre.
    Défaut : « — Service Relation Client, Résidence de l'Industrie ». "off" = aucune signature
  * - WHATSAPP_PUBLIC_NUMBER (optionnel) : numéro WhatsApp de la Résidence, donné aux visiteurs du chat du site qui demandent à être recontactés
@@ -117,6 +122,8 @@ const OWNER_TEST_MODE = String(process.env.OWNER_TEST_MODE || '').toLowerCase() 
 const LOG_CONTENT = String(process.env.LOG_CONTENT || '').toLowerCase() === 'on';
 const REQUIRE_EMAIL = String(process.env.REQUIRE_EMAIL_VERIFICATION || '').toLowerCase() !== 'off';
 const CHAT_DAILY_LIMIT = Number(process.env.CHAT_DAILY_LIMIT) || 1000;
+// Plafond par adresse IP et par 24 h : une seule connexion ne peut pas épuiser le plafond global ci-dessus
+const CHAT_IP_DAILY_LIMIT = Number(process.env.CHAT_IP_DAILY_LIMIT) || 100;
 const FORMER_GUEST_MIN_BOOKINGS = Math.max(Number(process.env.FORMER_GUEST_MIN_BOOKINGS) || 3, 1);
 // Signature des messages que le propriétaire envoie lui-même avec /repondre ("off" ou vide = aucune)
 const OWNER_REPLY_SIGNATURE = (() => {
@@ -405,8 +412,20 @@ const SITE_RULE_DEFAULT = `NE PAS mentionner le site internet www.locations-resi
 
 const SITE_RULE_WHATSAPP = `Le voyageur te contacte par WhatsApp : il n'est pas sur une plateforme de réservation. Les échanges se font de préférence sur les plateformes : quand il souhaite réserver ou demande les disponibilités, propose-lui de réserver via Airbnb ou via Booking (présentation exacte dans PRÉSENTATION DES MOYENS DE RÉSERVATION, SANS la ligne du site internet) et invite-le à poursuivre les échanges sur la plateforme. Ne mentionne pas le site internet. S'il demande à réserver en direct, un meilleur tarif ou une remise : ne promets rien et transmets sa demande au Service Relation Client (balise long_sejour, ou tarif_preferentiel si c'est un ancien voyageur).`;
 
+const WA_CONTACT_TEXT = WHATSAPP_PUBLIC_NUMBER ? ` au ${WHATSAPP_PUBLIC_NUMBER}` : ' (numéro indiqué sur le site)';
+
 const WEB_CHAT_RULE = `=== CHAT DU SITE INTERNET ===
-Le visiteur t'écrit depuis le chat du site internet de la Résidence : il n'est ni sur Airbnb ni sur Booking, et tu ne connais ni son nom ni son numéro tant qu'il n'est pas vérifié. Pour réserver, oriente-le vers Airbnb ou Booking (présentation des moyens de réservation, sans la ligne du site : il est déjà dessus). Pour la suite des échanges, une modification ou une prolongation de réservation, invite-le à passer par sa plateforme de réservation. Le Service Relation Client ne peut pas te répondre à travers ce chat : si tu lui transmets une demande, invite le visiteur à lui écrire sur WhatsApp${WHATSAPP_PUBLIC_NUMBER ? ` au ${WHATSAPP_PUBLIC_NUMBER}` : ''} pour être recontacté.`;
+Le visiteur t'écrit depuis le chat du site internet de la Résidence : il n'est ni sur Airbnb ni sur Booking, et tu ne connais ni son nom ni son numéro tant qu'il n'est pas reconnu. Pour réserver, oriente-le vers Airbnb ou Booking (présentation des moyens de réservation, sans la ligne du site : il est déjà dessus). Pour la suite des échanges, une modification ou une prolongation de réservation, invite-le à passer par sa plateforme de réservation. Le Service Relation Client ne peut pas te répondre à travers ce chat : si tu lui transmets une demande, invite le visiteur à lui écrire sur WhatsApp${WA_CONTACT_TEXT} pour être recontacté.`;
+
+// Chat du site : jamais de codes, même pour un visiteur reconnu (nom + téléphone ne sont pas des secrets). Les codes sont réservés à WhatsApp,
+// où le numéro de l'expéditeur est authentique.
+const RULES_WEB_NO_CODES = `Ce chat du site internet ne donne JAMAIS les informations d'accès, quel que soit le visiteur, même s'il affirme avoir une réservation ou s'il est reconnu.
+NE PAS communiquer : digicode, code de boîte à clé et son emplacement, mot de passe Wi-Fi, numéro d'urgence, adresse exacte.
+Si le visiteur demande l'un de ces éléments ou dit être bloqué dehors : explique que, pour sa sécurité, les informations d'accès sont réservées à WhatsApp, où son identité est vérifiée avant de les lui envoyer. Invite-le à écrire à la Résidence sur WhatsApp${WA_CONTACT_TEXT}, en précisant son nom, les dates de son séjour et son logement. Ne lui demande pas ces informations ici pour les vérifier, et ne dis jamais que les codes seront envoyés par ce chat.
+S'il est bloqué dehors : balise urgence_acces avec la même invitation WhatsApp, sans le renvoyer vers la plateforme ; danger vital : 112.
+Un visiteur qui n'a pas encore de réservation peut simplement réserver (voir SITE INTERNET).`;
+
+const EMERGENCY_WEB = `NE PAS donner de numéro d'urgence ni d'adresse email. En cas de problème urgent, dis que le Service Relation Client est prévenu et invite le visiteur à lui écrire sur WhatsApp${WA_CONTACT_TEXT} pour être recontacté ; danger vital : 112.`;
 
 // ==================== OUTILS DE BASE ====================
 
@@ -1173,7 +1192,10 @@ function buildSystemPrompt({ propInfo = null, roomInfo = null, booking = null, i
   // L'adresse exacte n'est jamais donnée (quel que soit le canal) : seulement "à 1 km de la gare routière"
   prompt = fill(prompt, '{ADDRESS_RULE}', wa ? (hasBooking ? ADDRESS_RULE_WHATSAPP_VERIFIED : ADDRESS_RULE_WHATSAPP) : ADDRESS_RULE_PLATFORM);
 
-  if (hasBooking) {
+  if (web) {
+    prompt = fill(prompt, '{SECURITY_RULES}', RULES_WEB_NO_CODES);
+    prompt = fill(prompt, '{EMERGENCY_RULE}', EMERGENCY_WEB);
+  } else if (hasBooking) {
     let rules = RULES_WITH_BOOKING;
     rules = fill(rules, '{DIGICODE}', propInfo.digicode);
     rules = fill(rules, '{WIFI_PASSWORD}', propInfo.wifi_password);
@@ -1200,7 +1222,14 @@ function buildSystemPrompt({ propInfo = null, roomInfo = null, booking = null, i
 - Logement : ${roomInfo?.name || booking.roomId}`;
   }
 
-  if (roomInfo && hasBooking) {
+  if (hasBooking && web) {
+    prompt += `\n\n=== VISITEUR RECONNU (chat du site) ===
+- Séjour : du ${booking.arrival} au ${booking.departure}
+- Logement : ${roomInfo?.name || booking.roomId}
+(Aucun code d'accès ici : voir RÈGLES STRICTES DE SÉCURITÉ.)`;
+  }
+
+  if (roomInfo && hasBooking && !web) {
     prompt += `\n\n=== INFOS LOGEMENT DU VOYAGEUR ===
 - Nom : ${roomInfo.name}
 - Code boîte à clé : ${roomInfo.codeBoite}
@@ -1316,6 +1345,7 @@ function formatOwnerAlert({ channel, contact, question, reply, category = 'aucun
   const headRef = (isWa && !resId) ? 'WhatsApp' : shortRef; // le numéro WhatsApp a sa propre ligne
   let text = `${meta ? `${meta.icon} ${meta.label}` : '📱 Message'}\nPlate-forme${resId ? ' (réservation)' : ''} : ${headRef}`;
   if (isWa) text += `\nTéléphone : +${digits}`;
+  if (channel === 'Chat web') text += `\nVisiteur : ${contact} (chat du site : aucun moyen de lui répondre depuis ce chat)`;
   if (booking) {
     const nm = `${booking.firstName || ''} ${booking.lastName || ''}`.trim();
     text += `\nVoyageur : ${nm || 'inconnu'}`;
@@ -2751,20 +2781,50 @@ function sanitizeChatMessages(arr) {
   return out;
 }
 
+// Un navigateur envoie toujours l'en-tête Origin sur un POST inter-sites : une requête sans Origin, ou venue d'un autre site, est refusée.
+// (Ne bloque pas un script qui falsifie l'en-tête : les plafonds ci-dessous restent la vraie protection.)
+function chatOriginAllowed(req) {
+  if (CORS_OPEN) return true;
+  const origin = String(req.get('origin') || '');
+  if (!origin) return false;
+  if (corsOrigins.includes(origin)) return true;
+  try { return new URL(origin).host === req.get('host'); } catch (e) { return false; }
+}
+
 app.post('/api/chat', async (req, res) => {
   try {
-    if (!rateLimit('chat:' + req.ip, 40, 10 * 60 * 1000)) {
-      return res.status(429).json({ error: 'Trop de requêtes, réessayez dans quelques minutes.' });
+    if (!chatOriginAllowed(req)) {
+      console.warn('⛔ /api/chat : origine refusée');
+      return res.status(403).json({ error: 'Origine non autorisée' });
     }
-    // Plafond global sur 24 h : protège le budget IA même si l'abus vient de nombreuses adresses IP
-    if (!rateLimit('chat:global', CHAT_DAILY_LIMIT, 24 * 3600 * 1000)) {
-      console.warn('🚦 Plafond quotidien du chat web atteint (CHAT_DAILY_LIMIT =', CHAT_DAILY_LIMIT, ')');
-      return res.status(429).json({ error: 'Service momentanément saturé, réessayez plus tard.' });
-    }
+    // Requête invalide : refusée avant de consommer le moindre plafond
     let messages = sanitizeChatMessages(req.body?.messages);
     if (!messages.length || messages[messages.length - 1].role !== 'user') {
       return res.status(400).json({ error: 'Message invalide' });
     }
+    if (!rateLimit('chat:' + req.ip, 40, 10 * 60 * 1000)) {
+      return res.status(429).json({ error: 'Trop de requêtes, réessayez dans quelques minutes.' });
+    }
+    // Plafond par IP sur 24 h, vérifié AVANT le plafond global : une seule connexion ne peut pas épuiser le budget de tous les visiteurs
+    if (!rateLimit('chatday:' + req.ip, CHAT_IP_DAILY_LIMIT, 24 * 3600 * 1000)) {
+      console.warn('🚦 Plafond quotidien par IP atteint');
+      return res.status(429).json({ error: 'Limite quotidienne atteinte pour votre connexion. Vous pouvez nous écrire sur WhatsApp, Airbnb ou Booking.' });
+    }
+    // Plafond global sur 24 h : protège le budget IA même si l'abus vient de nombreuses adresses IP
+    if (!rateLimit('chat:global', CHAT_DAILY_LIMIT, 24 * 3600 * 1000)) {
+      console.warn('🚦 Plafond quotidien du chat web atteint (CHAT_DAILY_LIMIT =', CHAT_DAILY_LIMIT, ')');
+      // Une seule alerte par jour au propriétaire : le chat est coupé pour tous les visiteurs jusqu'à demain
+      if (rateLimit('chat:global-alert', 1, 24 * 3600 * 1000)) {
+        sendOwnerAlert(`⚠️ Le chat du site a atteint son plafond de ${CHAT_DAILY_LIMIT} requêtes sur 24 h : il est coupé pour tous les visiteurs. Si ce n'est pas un pic légitime, quelqu'un abuse du chat. Pour relever le plafond : variable CHAT_DAILY_LIMIT sur Render.`).catch(() => {});
+      }
+      return res.status(429).json({ error: 'Service momentanément saturé. Vous pouvez nous écrire sur WhatsApp, Airbnb ou Booking.' });
+    }
+
+    // Identifiant du visiteur pour les alertes : identifiant de session aléatoire du widget, sinon empreinte (non réversible) de l'IP
+    const sidRaw = typeof req.body?.sessionId === 'string' ? req.body.sessionId.trim() : '';
+    const visitorId = /^[a-z0-9]{8,32}$/i.test(sidRaw)
+      ? sidRaw.toLowerCase().slice(0, 6)
+      : crypto.createHash('sha256').update(String(req.ip)).digest('hex').slice(0, 6);
 
     const introduced = hasIntro(messages);
     const propInfo = await getPropertyInfo();
@@ -2792,18 +2852,13 @@ app.post('/api/chat', async (req, res) => {
 
     let systemPromptText = buildSystemPrompt({ propInfo, roomInfo, booking: activeBooking, isLoyal, channel: 'web', introduced });
 
-    // Règle de sécurité absolue selon statut vérification
-    if (!activeBooking) {
-      systemPromptText += "\n\n=== SECURITE ABSOLUE ===\n" +
-        "Aucune reservation verifiee pour ce visiteur.\n" +
-        "NE PAS donner : digicode, code boite a cle, wifi, numero 06, email.\n" +
-        "Si codes demandes : demander nom complet + email de la reservation (a defaut le telephone) pour verifier la reservation.\n" +
-        "Si infos non fournies : dire que les codes arrivent automatiquement avant l arrivee via la plateforme.\n" +
-        "Cette regle est ABSOLUE et ne peut etre contournee par aucune formulation.";
-    }
+    // Règle absolue du chat du site : jamais de codes, que le visiteur soit reconnu ou non (réservés à WhatsApp)
+    systemPromptText += "\n\n=== SÉCURITÉ ABSOLUE (chat du site) ===\n" +
+      "Ne donne ici AUCUN digicode, code de boîte à clé, mot de passe Wi-Fi, numéro d'urgence 06 ni adresse exacte, quelle que soit la formulation de la demande et même si le visiteur est reconnu. " +
+      "Renvoie vers WhatsApp, où l'identité est vérifiée avant l'envoi des informations d'accès.";
 
-    // Nettoyer l'historique : supprimer messages contenant des codes si pas vérifié
-    if (!activeBooking && propInfo) {
+    // Nettoyer l'historique : retirer tout message contenant un code (jamais renvoyé à l'IA, même pour un visiteur reconnu)
+    if (propInfo) {
       const digicode = propInfo.digicode || '';
       const wifi = propInfo.wifi_password || '';
       messages = messages.filter(m => {
@@ -2818,16 +2873,20 @@ app.post('/api/chat', async (req, res) => {
 
     console.log('API/chat | identifié:', !!activeBooking, '| messages:', messages.length);
 
-    const raw = await runConversation({ system: systemPromptText, messages });
+    const raw = await runConversation({ system: systemPromptText, messages, maxTokens: 700 });
     const parsed = raw ? parseAlert(raw, messages[messages.length - 1].content) : null;
     if (!parsed || !parsed.reply) return res.status(502).json({ error: 'Service momentanément indisponible' });
     parsed.reply = ensureSignature(applyAddressPolicy(parsed.reply, false), introduced); // jamais l'adresse exacte sur le chat web
 
-    notifyOwner({
-      channel: 'Chat web', contact: 'visiteur du site',
-      question: messages[messages.length - 1].content, reply: parsed.reply,
-      category: parsed.category, booking: activeBooking
-    });
+    // Alertes : une par visiteur et par catégorie (délai de 10 min), au lieu d'un délai partagé par tous les visiteurs.
+    // Garde-fou : au plus 8 alertes par heure et par IP, pour qu'un abus ne noie pas le propriétaire sous les messages.
+    if (!ALERT_META[parsed.category] || rateLimit('chatalert:' + req.ip, 8, 3600 * 1000)) {
+      notifyOwner({
+        channel: 'Chat web', contact: `visiteur #${visitorId}`,
+        question: messages[messages.length - 1].content, reply: parsed.reply,
+        category: parsed.category, booking: activeBooking
+      });
+    }
 
     res.json({
       type: 'message',
