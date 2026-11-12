@@ -51,6 +51,15 @@ function applyEmailRequirement(b, res) {
   return res;
 }
 
+// ==================== IDENTIFIANTS NON SECRETS (en dur, évite des variables Render) ====================
+// À remplir ici. Une variable Render du même nom, si elle existe, reste prioritaire.
+// Les secrets (jetons, clés, ADMIN_KEY...) ne vont JAMAIS ici : ils restent sur Render.
+const OWNER_PHONE = process.env.OWNER_PHONE || '+33659074675';                         // ex. '+33612345678' (numéro WhatsApp du propriétaire)
+const WHATSAPP_PHONE_ID = process.env.WHATSAPP_PHONE_ID || '1040369589162757';             // identifiant du numéro WhatsApp Business (Meta)
+const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '';               // optionnel
+const WHATSAPP_ALERT_TEMPLATE = process.env.WHATSAPP_ALERT_TEMPLATE || ''; // optionnel : nom du modèle approuvé
+const WHATSAPP_ALERT_TEMPLATE_LANG = process.env.WHATSAPP_ALERT_TEMPLATE_LANG || 'fr';
+
 const SITE_URL = 'https://www.locations-residence-industrie.fr';
 const BOOKING_URL = 'https://www.booking.com/Share-4ZhcuX6';
 // L'adresse exacte n'est JAMAIS communiquée : la seule précision autorisée est la distance à la gare routière
@@ -58,7 +67,7 @@ const ADDRESS_HINT = 'à 1 km de la gare routière';
 // Adresse exacte : seulement pour un voyageur vérifié dont le séjour est en cours, sur WhatsApp, s'il la demande
 const ADDRESS_FULL = "11 rue de l'Industrie, 02100 Saint-Quentin";
 // Numéro WhatsApp public de la Résidence, donné aux visiteurs du chat du site (optionnel, ex. +33 6 12 34 56 78)
-const WHATSAPP_PUBLIC_NUMBER = String(process.env.WHATSAPP_PUBLIC_NUMBER || '').trim();
+const WHATSAPP_PUBLIC_NUMBER = String(process.env.WHATSAPP_PUBLIC_NUMBER || '').trim(); // numéro public (peut aussi être mis en dur ici)
 
 if (!process.env.WEBHOOK_VERIFY_TOKEN) console.warn('⚠️ WEBHOOK_VERIFY_TOKEN non défini : la (re)configuration du webhook chez Meta sera refusée. Définissez-le sur Render.');
 if (!process.env.ADMIN_KEY) console.warn('⚠️ ADMIN_KEY non défini : les routes /status, /test-*, /setup-beds24 et /debug-beds24 sont désactivées.');
@@ -118,6 +127,11 @@ module.exports = {
   ADDRESS_HINT,
   ADDRESS_FULL,
   WHATSAPP_PUBLIC_NUMBER,
+  OWNER_PHONE,
+  WHATSAPP_PHONE_ID,
+  TELEGRAM_CHAT_ID,
+  WHATSAPP_ALERT_TEMPLATE,
+  WHATSAPP_ALERT_TEMPLATE_LANG,
   LOCK_INSTRUCTIONS,
   LONG_STAY_POLICY,
   PENDING_WATCH,

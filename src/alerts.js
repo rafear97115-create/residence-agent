@@ -3,6 +3,7 @@
  * (extrait de l'ancien server.js ; voir server.js pour l'architecture)
  */
 
+const { TELEGRAM_CHAT_ID } = require('./config');
 const { bookingPhone, getPropertyInfo } = require('./beds24');
 const { candidateBookings } = require('./identity');
 const { getOwnerNumber, sendOwnerAlert } = require('./messaging');
@@ -106,7 +107,7 @@ async function notifyOwner({ channel, contact, question, reply, category = 'aucu
     const meta = ALERT_META[category];
     if (!meta && process.env.NOTIFY_ALL !== 'true') return true;
     const owner = getOwnerNumber();
-    if (!owner && !process.env.TELEGRAM_CHAT_ID) { console.warn('⚠️ OWNER_PHONE non défini : alerte non envoyée'); return false; }
+    if (!owner && !TELEGRAM_CHAT_ID) { console.warn('⚠️ OWNER_PHONE non défini : alerte non envoyée'); return false; }
     const contactDigits = String(contact).replace(/\D/g, '');
     if (channel === 'WhatsApp' && owner === contactDigits) return true; // inutile de se notifier soi-même
 

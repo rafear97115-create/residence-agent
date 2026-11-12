@@ -3,16 +3,16 @@
  * (extrait de l'ancien server.js ; voir server.js pour l'architecture)
  */
 
-const { WHATSAPP_API_VERSION } = require('./config');
+const { WHATSAPP_API_VERSION, OWNER_PHONE, WHATSAPP_PHONE_ID, TELEGRAM_CHAT_ID, WHATSAPP_ALERT_TEMPLATE, WHATSAPP_ALERT_TEMPLATE_LANG } = require('./config');
 const { fetchT, normalizeWaNumber, scrub } = require('./utils');
 
 function getOwnerNumber() {
-  return normalizeWaNumber(process.env.OWNER_PHONE || '');
+  return normalizeWaNumber(OWNER_PHONE);
 }
 
 async function sendWhatsAppReply(to, message) {
   try {
-    const phoneId = process.env.WHATSAPP_PHONE_ID;
+    const phoneId = WHATSAPP_PHONE_ID;
     const token = process.env.WHATSAPP_TOKEN;
     const response = await fetchT(`https://graph.facebook.com/${WHATSAPP_API_VERSION}/${phoneId}/messages`, {
       method: 'POST',
@@ -39,7 +39,7 @@ function flattenForTemplate(text) {
 
 async function sendWhatsAppTemplate(to, name, lang, params) {
   try {
-    const response = await fetchT(`https://graph.facebook.com/${WHATSAPP_API_VERSION}/${process.env.WHATSAPP_PHONE_ID}/messages`, {
+    const response = await fetchT(`https://graph.facebook.com/${WHATSAPP_API_VERSION}/${WHATSAPP_PHONE_ID}/messages`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${process.env.WHATSAPP_TOKEN}` },
       body: JSON.stringify({
@@ -58,7 +58,7 @@ async function sendWhatsAppTemplate(to, name, lang, params) {
 
 async function sendTelegram(text) {
   const token = process.env.TELEGRAM_BOT_TOKEN;
-  const chat = process.env.TELEGRAM_CHAT_ID;
+  const chat = TELEGRAM_CHAT_ID;
   if (!token || !chat) return false;
   try {
     const response = await fetchT(`https://api.telegram.org/bot${token}/sendMessage`, {
@@ -79,8 +79,8 @@ async function sendTelegram(text) {
 async function sendOwnerAlert(text) {
   const owner = getOwnerNumber();
   if (owner && await sendWhatsAppReply(owner, text)) return true;
-  const tpl = process.env.WHATSAPP_ALERT_TEMPLATE;
-  if (owner && tpl && await sendWhatsAppTemplate(owner, tpl, process.env.WHATSAPP_ALERT_TEMPLATE_LANG || 'fr', [flattenForTemplate(text)])) return true;
+  const tpl = WHATSAPP_ALERT_TEMPLATE;
+  if (owner && tpl && await sendWhatsAppTemplate(owner, tpl, WHATSAPP_ALERT_TEMPLATE_LANG, [flattenForTemplate(text)])) return true;
   return sendTelegram(text);
 }
 
