@@ -57,8 +57,8 @@ function applyEmailRequirement(b, res) {
 // Deux façons de les renseigner : une variable Render du même nom (prioritaire), ou remplacer la valeur '' ci-dessous par la valeur en dur.
 // Vides, ils ne produisent aucune erreur : le bot démarre mais ne peut pas envoyer d'alertes (voir les avertissements au démarrage).
 // Les secrets (jetons, clés, ADMIN_KEY...) ne vont JAMAIS ici : ils restent sur Render.
-const OWNER_PHONE = process.env.OWNER_PHONE || '';                         // ex. '+33612345678' (numéro WhatsApp du propriétaire)
-const WHATSAPP_PHONE_ID = process.env.WHATSAPP_PHONE_ID || '';             // identifiant du numéro WhatsApp Business (Meta)
+const OWNER_PHONE = process.env.OWNER_PHONE || '+33659074675';                         // ex. '+33612345678' (numéro WhatsApp du propriétaire)
+const WHATSAPP_PHONE_ID = process.env.WHATSAPP_PHONE_ID || '1040369589162757';             // identifiant du numéro WhatsApp Business (Meta)
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '';               // optionnel
 const WHATSAPP_ALERT_TEMPLATE = process.env.WHATSAPP_ALERT_TEMPLATE || ''; // optionnel : nom du modèle approuvé
 const WHATSAPP_ALERT_TEMPLATE_LANG = process.env.WHATSAPP_ALERT_TEMPLATE_LANG || 'fr';
