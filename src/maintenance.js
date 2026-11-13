@@ -8,7 +8,8 @@ const { bookingByIdCache } = require('./beds24');
 const { bookingEventAttempts } = require('./bookings-watch');
 const { beds24Attempts, processedMessages } = require('./platforms');
 const { rateBuckets } = require('./security');
-const { COURTESY_WINDOW_MS, MEMORY_TTL_MS, convTtl, conversations, courtesyAt, introducedBookings, pauses, seenBookingEvents, seenWaIds } = require('./state');
+const { COURTESY_WINDOW_MS, MEMORY_TTL_MS, bookingFingerprints, convTtl, conversations, courtesyAt, introducedBookings, pauses, seenBookingEvents, seenWaIds } = require('./state');
+const { addDays, parisToday } = require('./utils');
 const { lastNonTextReply } = require('./whatsapp');
 
 // Nettoyage périodique
@@ -30,7 +31,10 @@ setInterval(() => {
   for (const [k, t] of lastNonTextReply) if (now - t > 24 * 3600 * 1000) lastNonTextReply.delete(k);
   for (const [k, v] of beds24Attempts) if (now - v.t > 24 * 3600 * 1000) beds24Attempts.delete(k);
   for (const [k, v] of bookingEventAttempts) if (now - v.t > 24 * 3600 * 1000) bookingEventAttempts.delete(k);
-  for (const [k, t] of seenBookingEvents) if (now - t > 7 * 24 * 3600 * 1000) seenBookingEvents.delete(k);
+  // 60 jours (et non 7) : une annulation tardive doit retrouver si la réservation avait été signalée comme confirmée ou comme simple demande
+  for (const [k, t] of seenBookingEvents) if (now - t > 60 * 24 * 3600 * 1000) seenBookingEvents.delete(k);
+  const oldDeparture = addDays(parisToday(), -14);
+  for (const [k, v] of bookingFingerprints) if (v.d < oldDeparture) bookingFingerprints.delete(k); // séjour terminé depuis plus de 14 jours
   for (const [k, t] of introducedBookings) if (now - t > 30 * 24 * 3600 * 1000) introducedBookings.delete(k);
   for (const [k, v] of bookingByIdCache) if (now - v.at > 5 * 60 * 1000) bookingByIdCache.delete(k);
   if (processedMessages.size > 5000) { // l'ensemble ne doit pas grossir sans fin

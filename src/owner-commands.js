@@ -3,13 +3,14 @@
  * (extrait de l'ancien server.js ; voir server.js pour l'architecture)
  */
 
-const { ownerCtx } = require('./alerts');
-const { bookingPhone, detectPlatform, getBeds24Token, getBookingById, getPropertyInfo, getStays, sendBeds24Message } = require('./beds24');
-const { AGENT_START_TIME, OWNER_REPLY_SIGNATURE, OWNER_TEST_MODE, PAUSE_HOURS, PENDING_ACK, PENDING_WATCH, REQUIRE_EMAIL, STAY_VERIFICATION } = require('./config');
+const { fmtDate, ownerCtx } = require('./alerts');
+const { bookingPhone, detectPlatform, getBeds24Token, getBookingByIdSafe, getPropertyInfo, getStays, isActiveStay, maskPhone, sendBeds24Message } = require('./beds24');
+const { AGENT_START_TIME, CANCEL_WATCH, MODIFY_WATCH, OWNER_REPLY_SIGNATURE, OWNER_TEST_MODE, PAUSE_HOURS, PENDING_ACK, PENDING_WATCH, REQUIRE_EMAIL, STAY_VERIFICATION, VERIFY_FAIL_GLOBAL_LIMIT } = require('./config');
 const { getOwnerNumber, sendWhatsAppReply } = require('./messaging');
+const { verificationFailureCount, verificationSuspended } = require('./identity');
 const { describeRoom } = require('./rooms');
 const { conversations, ensureConv, isLocked, isPaused, markDirty, pauseConversation, pauses, resumeConversation, runSerial } = require('./state');
-const { normalizeText, normalizeWaNumber, parisToday } = require('./utils');
+const { addDays, bookingPhoneKeys, normalizeText, normalizeWaNumber, parisToday, phoneKey } = require('./utils');
 
 function pauseLabel(key) {
   return String(key).startsWith('b') ? `la réservation ${String(key).slice(1)}` : `+${key}`;
@@ -38,7 +39,7 @@ function ownerHelpText() {
     "",
     "🔓 *IDENTITÉ DES VOYAGEURS (WhatsApp)*",
     "*/valider bRÉSERVATION [numéro]*",
-    "→ Confirme à la main l'identité d'un voyageur : le bot lui envoie ses informations d'accès.",
+    "→ Confirme à la main l'identité d'un voyageur : le bot lui envoie ses informations d'accès. Réservation CONFIRMÉE uniquement, et séjour en cours ou à partir de la veille de l'arrivée (sinon refusé, avec la date).",
     "Ex : /valider b95878640 33612345678",
     "*/debloquer [numéro]*",
     "→ Lève le blocage d'un numéro après trop de tentatives d'identification ratées.",
@@ -99,6 +100,8 @@ function ownerStatusText() {
     `- Vérification du séjour (nom + dates + logement) : ${onOff(STAY_VERIFICATION)}`,
     `- Email exigé si la réservation en contient un vrai : ${REQUIRE_EMAIL ? 'oui' : 'non'}`,
     `- Surveillance des demandes en attente : ${onOff(PENDING_WATCH)}`,
+    `- Alertes d'annulation : ${onOff(CANCEL_WATCH)} · de modification : ${onOff(MODIFY_WATCH)}`,
+    `- Échecs de vérification (dernière heure, tous numéros) : ${verificationFailureCount()} / ${VERIFY_FAIL_GLOBAL_LIMIT}${verificationSuspended() ? ' → ⛔ vérification automatique SUSPENDUE (utilisez /valider)' : ''}`,
     `- Accusé de réception automatique des demandes : ${onOff(PENDING_ACK)}`,
     `- Mode test propriétaire : ${onOff(OWNER_TEST_MODE)}`,
     '',
@@ -229,19 +232,37 @@ async function handleOwnerCommand(text) {
   if (cmd === '/valider') {
     const phone = numArg ? normalizeWaNumber(numArg) : (ownerCtx.lastNotified && !String(ownerCtx.lastNotified).startsWith('b') ? ownerCtx.lastNotified : null);
     if (!bArg || !phone) return say('Usage : /valider bIDRÉSERVATION [numéro WhatsApp du voyageur]\nExemple : /valider b95878640 33612345678');
-    const b = await getBookingById(bArg.slice(1));
+    const r = await getBookingByIdSafe(bArg.slice(1));
+    if (!r.ok) return say(`❌ Beds24 est injoignable pour le moment : ${bArg} n'a pas pu être contrôlée. Rien n'a été validé, réessayez dans quelques minutes.`);
+    const b = r.data;
     if (!b) return say(`Réservation ${bArg} introuvable.`);
+    // Mêmes conditions que pour la vérification automatique : sinon le bot « oublierait » la validation au message suivant
+    // (c'était le cas avant : /valider annonçait un succès alors qu'aucun code ne pouvait être donné).
+    if (String(b.status || '').toLowerCase() !== 'confirmed') return say(`❌ ${bArg} a le statut « ${b.status || 'inconnu'} » : seules les réservations confirmées donnent accès aux codes. Rien n'a été validé.`);
+    if (!isActiveStay(b)) {
+      const a = String(b.arrival || '').slice(0, 10), d = String(b.departure || '').slice(0, 10);
+      const why = d && d < parisToday()
+        ? `le séjour est terminé (départ le ${fmtDate(d)})`
+        : `le séjour n'a pas commencé (arrivée le ${fmtDate(a)}) : les codes ne sont accessibles qu'à partir de la veille de l'arrivée, le ${fmtDate(addDays(a, -1))}`;
+      return say(`❌ ${bArg} : ${why}. Rien n'a été validé : refaites /valider à partir de cette date.`);
+    }
     const conv = ensureConv(phone);
     conv.verifiedBookingId = b.id;
     conv.locked = false; conv.lockedAt = 0;
     conv.failedAttempts = 0; conv.failedAt = 0;
     markDirty();
     resumeConversation(phone);
-    await say(`✅ +${phone} validé : ${b.firstName || ''} ${b.lastName || ''}, du ${b.arrival} au ${b.departure}. Le bot lui envoie ses informations d'accès.`);
+    const keys = bookingPhoneKeys(b);
+    const diff = keys.length && !keys.includes(phoneKey(phone));
+    await say(`✅ +${phone} validé : ${b.firstName || ''} ${b.lastName || ''}, du ${b.arrival} au ${b.departure}. Le bot lui envoie ses informations d'accès.`
+      + (diff ? `\n⚠️ Ce numéro est différent du téléphone enregistré dans la réservation (${maskPhone(bookingPhone(b))}) : assurez-vous d'avoir bien identifié le voyageur.` : ''));
     // Le voyageur reçoit tout de suite ses informations, sans avoir à réécrire
     const synthetic = () => require('./whatsapp').handleWhatsAppMessage({ from: phone, type: 'text', text: { body: "Le propriétaire a confirmé ma réservation. Pouvez-vous me donner les informations d'accès ?" } });
     // Dans la file du voyageur (pas de course avec un vrai message) ; sauf si c'est le numéro du propriétaire lui-même (test) : on est déjà dans sa file
     if (phone === owner) await synthetic(); else await runSerial(phone, synthetic);
+    // Contrôle : si la validation n'a pas tenu (Beds24 injoignable à cet instant, réservation modifiée...), le propriétaire le sait tout de suite
+    const after = conversations.get(phone);
+    if (!after || String(after.verifiedBookingId) !== String(b.id)) await say(`⚠️ La validation de +${phone} n'a pas tenu (Beds24 ou réservation modifiée à l'instant). Le voyageur n'a probablement pas reçu ses codes : vérifiez avec /sejour et refaites /valider.`);
     return;
   }
   if (cmd === '/debloquer') {

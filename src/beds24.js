@@ -120,25 +120,49 @@ function isActiveStay(b, today = parisToday()) {
 }
 
 // Réservations actives (cache 60 s pour ne pas interroger Beds24 à chaque message)
+// En cas d'erreur Beds24, on distingue « injoignable » de « aucune réservation » : { ok: false, data } avec, si disponible, la dernière
+// liste connue (30 min au plus, filtrée sur la date du jour). Sans cela, une simple panne faisait oublier les voyageurs déjà vérifiés.
+const STALE_ACTIVE_MS = 30 * 60 * 1000;
 let activeBookingsCache = { at: 0, data: [] };
 
-async function getAllActiveBookings() {
-  if (Date.now() - activeBookingsCache.at < 60000) return activeBookingsCache.data;
+async function getActiveBookingsSafe() {
+  if (Date.now() - activeBookingsCache.at < 60000) return { ok: true, data: activeBookingsCache.data };
+  const stale = () => ({
+    ok: false,
+    data: activeBookingsCache.at && Date.now() - activeBookingsCache.at < STALE_ACTIVE_MS ? activeBookingsCache.data.filter(b => isActiveStay(b)) : []
+  });
   try {
     const token = await getBeds24Token();
-    if (!token) return [];
+    if (!token) return stale();
 
     const today = parisToday();
     const res = await fetchBeds24List(`bookings?departureFrom=${addDays(today, -1)}&arrivalTo=${addDays(today, 1)}&status=confirmed&maxResults=100`, token);
     const bookings = res.data;
-    if (!res.ok || !Array.isArray(bookings)) return [];
+    if (!res.ok || !Array.isArray(bookings)) return stale();
 
     const active = bookings.filter(b => isActiveStay(b, today));
     activeBookingsCache = { at: Date.now(), data: active };
-    return active;
+    return { ok: true, data: active };
   } catch (err) {
     console.error('Erreur getAllActiveBookings:', err.message);
-    return [];
+    return stale();
+  }
+}
+
+async function getAllActiveBookings() {
+  return (await getActiveBookingsSafe()).data;
+}
+
+// Réservations confirmées en cours ou à venir (pour mémoriser leurs dates/logement : détection des modifications). null si erreur.
+async function getUpcomingConfirmed() {
+  try {
+    const token = await getBeds24Token();
+    if (!token) return null;
+    const res = await fetchBeds24List(`bookings?departureFrom=${parisToday()}&status=confirmed&maxResults=200`, token);
+    return res.ok && Array.isArray(res.data) ? res.data : null;
+  } catch (err) {
+    console.error('Erreur getUpcomingConfirmed:', err.message);
+    return null;
   }
 }
 
@@ -265,24 +289,29 @@ function detectPlatform(b) {
 
 // Réservation retrouvée par son numéro (celui du message), quelles que soient les dates
 const bookingByIdCache = new Map();
-async function getBookingById(id) {
+// { ok, data } : ok=false = Beds24 injoignable ou réponse illisible (on ne sait PAS si la réservation existe) ; ok=true et data=null = introuvable
+async function getBookingByIdSafe(id) {
   const key = String(id);
   const hit = bookingByIdCache.get(key);
-  if (hit && Date.now() - hit.at < 60000) return hit.data;
+  if (hit && Date.now() - hit.at < 60000) return { ok: true, data: hit.data };
   try {
     const token = await getBeds24Token();
-    if (!token) return null;
+    if (!token) return { ok: false, data: null };
     const response = await fetchT(`https://beds24.com/api/v2/bookings?id=${encodeURIComponent(key)}`, { headers: { 'token': token } });
-    if (!response.ok) { console.error('Erreur réservation Beds24:', response.status); return null; }
+    if (!response.ok) { console.error('Erreur réservation Beds24:', response.status); return { ok: false, data: null }; }
     const raw = await response.json();
     const list = raw?.data || raw;
-    const b = Array.isArray(list) ? list.find(x => String(x.id) === key) || null : null;
+    if (!Array.isArray(list)) return { ok: false, data: null };
+    const b = list.find(x => String(x.id) === key) || null;
     bookingByIdCache.set(key, { at: Date.now(), data: b });
-    return b;
+    return { ok: true, data: b };
   } catch (err) {
     console.error('Erreur getBookingById:', err.message);
-    return null;
+    return { ok: false, data: null };
   }
+}
+async function getBookingById(id) {
+  return (await getBookingByIdSafe(id)).data;
 }
 
 // Envoie un message "hôte" sur une réservation Beds24 (relayé vers Airbnb / Booking par le channel manager)
@@ -334,6 +363,8 @@ module.exports = {
   getPropertyInfo,
   isActiveStay,
   getAllActiveBookings,
+  getActiveBookingsSafe,
+  getUpcomingConfirmed,
   getStays,
   GUEST_COUNT_TTL_MS,
   guestCountCache,
@@ -343,6 +374,7 @@ module.exports = {
   detectPlatform,
   bookingByIdCache,
   getBookingById,
+  getBookingByIdSafe,
   sendBeds24Message,
   bookingPhone,
   maskPhone,

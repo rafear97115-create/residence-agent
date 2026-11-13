@@ -97,7 +97,8 @@ const courtesyAt = new Map();
 const introducedBookings = new Map(); // réservations Beds24 où le bot s'est déjà présenté (id → date)
 
 // ==================== PERSISTANCE (survit aux redémarrages) ====================
-// Un petit fichier JSON garde : les pauses, les vérifications d'identité, les alertes déjà envoyées et les présentations déjà faites.
+// Un petit fichier JSON garde : les pauses, les vérifications d'identité, les alertes déjà envoyées, les présentations déjà faites
+// et les dates/logement connus des réservations confirmées (détection des modifications).
 // Aucun texte de message ni identité de voyageur n'y est écrit (uniquement des numéros, des ID de réservation et des dates).
 // Sur Render, le fichier ne survit à un redémarrage que sur un disque persistant (voir STATE_FILE).
 
@@ -126,6 +127,7 @@ function snapshotState(now = Date.now()) {
     version: 1, savedAt: now,
     pauses: Object.fromEntries([...pauses].filter(([, until]) => until > now)),
     seenBookingEvents: Object.fromEntries(seenBookingEvents),
+    bookingFingerprints: Object.fromEntries(bookingFingerprints),
     introducedBookings: Object.fromEntries(introducedBookings),
     seenWaIds: Object.fromEntries([...seenWaIds].filter(([, t]) => now - t < 6 * 3600 * 1000)),
     conversations: convs
@@ -136,6 +138,7 @@ function restoreState(data, now = Date.now()) {
   if (!data || typeof data !== 'object') return;
   for (const [k, until] of Object.entries(data.pauses || {})) if (Number(until) > now) pauses.set(k, Number(until));
   for (const [k, t] of Object.entries(data.seenBookingEvents || {})) seenBookingEvents.set(k, Number(t) || now);
+  for (const [k, v] of Object.entries(data.bookingFingerprints || {})) if (v && v.a && v.d) bookingFingerprints.set(k, { a: String(v.a), d: String(v.d), r: String(v.r ?? ''), t: Number(v.t) || now });
   for (const [k, t] of Object.entries(data.introducedBookings || {})) introducedBookings.set(k, Number(t) || now);
   for (const [id, t] of Object.entries(data.seenWaIds || {})) if (now - Number(t) < 6 * 3600 * 1000) seenWaIds.set(id, Number(t));
   for (const [phone, c] of Object.entries(data.conversations || {})) {
@@ -191,6 +194,8 @@ function loadState() {
 
 // Alertes déjà envoyées : "idRéservation:type" → date (conservé dans le fichier d'état)
 const seenBookingEvents = new Map();
+// Dernières dates / logement connus de chaque réservation confirmée : "idRéservation" → { a: arrivée, d: départ, r: logement, t } (détection des modifications)
+const bookingFingerprints = new Map();
 
 function isPersistenceOn() { return persistenceOn; }
 
@@ -229,5 +234,6 @@ module.exports = {
   PERSISTENT_DISK,
   loadState,
   seenBookingEvents,
+  bookingFingerprints,
   isPersistenceOn
 };

@@ -26,12 +26,15 @@ const ALERT_META = {
 
 const ALERT_RE = /\[\[\s*ALERTE\s*:\s*([a-z_]+)\s*\]\]/gi;
 
+// Filet de secours : utilisé SEULEMENT quand le modèle a oublié la balise [[ALERTE:...]]. Les mots isolés (« direction », « responsable »,
+// « voisin », « bloquer ») donnaient de fausses alertes (« quelle direction pour la gare ? », « bloquer une date »,
+// « un supermarché dans le voisinage ? ») : on exige maintenant une vraie formulation (parler à..., je suis bloqué dehors...).
 function fallbackCategory(userText) {
   const t = normalizeText(userText);
-  if (/bloqu|(code|digicode|porte|cle|boite).{0,40}(marche pas|fonctionne pas|ne marche|ouvre pas|ouvre plus)|impossible (d'|de )?(entrer|rentrer|ouvrir)/.test(t)) return 'urgence_acces';
+  if (/(?:suis|sommes|reste|restons|coince|coinces?)\b.{0,15}\b(?:bloque|bloquee|bloques|bloquees|dehors|coince|coinces)|bloque(?:e|es|s)?\s+(?:dehors|devant|a l'exterieur|a la porte)|enferme|(?:code|digicode|porte|cle|boite).{0,40}(?:marche pas|fonctionne pas|ne marche|ouvre pas|ouvre plus)|impossible (?:d'|de )?(?:entrer|rentrer|ouvrir)|(?:peux|peut|arrive|arrivons) (?:pas|plus) (?:a )?(?:entrer|rentrer|ouvrir)/.test(t)) return 'urgence_acces';
   if (/fuite|inond|degat des eaux|panne|plus (d'eau|de chauffage|d'electricite|de courant)|incendie|fumee|court-circuit/.test(t)) return 'urgence_technique';
-  if (/\bbruit|tapage|voisin|insupportable/.test(t)) return 'plainte';
-  if (/proprietaire|responsable|service (relation )?client|direction|parler a (quelqu'un|un humain|une personne)|un humain/.test(t)) return 'contact_humain';
+  if (/\bbruit|\bbruyan|tapage|insupportable|voisins?\b.{0,40}(?:fete|musique|cris?\b|derang|gene)/.test(t)) return 'plainte';
+  if (/(?:parler|contacter|joindre|appeler|voir|ecrire|passer|avoir).{0,25}(?:proprietaire|responsable|direction|directeur|directrice|gerant|service (?:relation )?client|quelqu'un|un humain|une personne|conseiller)|\bun humain\b|service (?:relation )?client/.test(t)) return 'contact_humain';
   return 'aucune';
 }
 

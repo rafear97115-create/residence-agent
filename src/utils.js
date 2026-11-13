@@ -73,10 +73,10 @@ function normalizeWaNumber(s) {
   return n;
 }
 
-let fetchPromise = null;
-function getFetch() {
-  if (!fetchPromise) fetchPromise = import('node-fetch').then(m => m.default);
-  return fetchPromise;
+// fetch natif de Node 18+ (la dépendance node-fetch n'est plus nécessaire) ; lu à chaque appel pour pouvoir être remplacé dans les tests
+async function getFetch() {
+  if (typeof globalThis.fetch !== 'function') throw new Error('fetch indisponible : Node 18 ou plus récent requis');
+  return globalThis.fetch;
 }
 
 // fetch avec délai maximum, pour ne jamais bloquer le serveur
@@ -108,7 +108,7 @@ function logName(b) {
   return [b.firstName, b.lastName].filter(Boolean).map(x => String(x)[0].toUpperCase() + '.').join(' ') || '?';
 }
 
-// Retire d'un message d'erreur tout jeton de bot Telegram (node-fetch recopie l'URL complète dans ses erreurs réseau)
+// Retire d'un message d'erreur tout jeton de bot Telegram (les erreurs réseau peuvent recopier l'URL complète)
 function scrub(s) {
   return String(s ?? '').replace(/bot\d{5,}:[A-Za-z0-9_-]{20,}/g, 'bot[masqué]');
 }

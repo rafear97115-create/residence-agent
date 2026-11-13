@@ -54,7 +54,8 @@ const ADDRESS_RE = new RegExp(
     '(?:\\bau\\s+)?' +
     '(?:(?:n\\s?\u00B0|no\\b\\.?|num(?:\u00E9|e)ro)\\s*)?' +
     '(?:\\b11\\s*(?:bis\\b\\s*)?,?\\s*(?:de\\s+la\\s+)?)?' +
-    '\\b(?:rue|r\\.?|ru)\\s+de\\s+l' + ADDR_APOS + '?\\s*industrie\\b' +
+    '\\b(?:rue|r\\.?|ru)\\s+(?:de\\s+(?:la\\s+|l' + ADDR_APOS + '?\\s*)|l' + ADDR_APOS + '\\s*)?industrie\\b' +
+    '(?:\\s*,?\\s*(?:n\\s?\\u00B0\\s*)?11\\b(?:\\s*bis\\b)?)?' + // numéro placé APRÈS la rue : "rue de l'Industrie 11"
     '(?:\\s*,?\\s*0?2\\s?100(?:\\s*[-,]?\\s*(?:saint|st)[\\s.-]*quentin)?|\\s*,?\\s*(?:saint|st)[\\s.-]*quentin)?' +
   ')|(?:' +
     '(?:\\b11\\s+)?\\bindustry\\s+(?:street|st\\b\\.?)(?:\\s*,?\\s*(?:0?2\\s?100|(?:saint|st)[\\s.-]*quentin))?' +
@@ -73,6 +74,11 @@ function limitReached(key, max, windowMs) {
   const now = Date.now();
   return (rateBuckets.get(key) || []).filter(t => now - t < windowMs).length >= max;
 }
+// Nombre d'événements enregistrés (recordHit) dans la fenêtre
+function countHits(key, windowMs) {
+  const now = Date.now();
+  return (rateBuckets.get(key) || []).filter(t => now - t < windowMs).length;
+}
 function recordHit(key, windowMs) {
   const now = Date.now();
   const arr = (rateBuckets.get(key) || []).filter(t => now - t < windowMs);
@@ -89,5 +95,6 @@ module.exports = {
   ADDRESS_RE,
   applyAddressPolicy,
   limitReached,
+  countHits,
   recordHit
 };

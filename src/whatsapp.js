@@ -7,7 +7,7 @@ const { generateAIReply, generateCourtesyReply, isPureCourtesy } = require('./ai
 const { notifyOwner, parseAlert } = require('./alerts');
 const { countGuestBookings, getPropertyInfo } = require('./beds24');
 const { FORMER_GUEST_MIN_BOOKINGS, OWNER_TEST_MODE } = require('./config');
-const { identifyWhatsAppGuest } = require('./identity');
+const { identifyWhatsAppGuest, verificationSuspended } = require('./identity');
 const { getOwnerNumber, sendOwnerAlert, sendWhatsAppReply } = require('./messaging');
 const { handleOwnerCommand } = require('./owner-commands');
 const { buildSystemPrompt, ensureSignature, hasIntro } = require('./prompts');
@@ -119,7 +119,7 @@ async function handleWhatsAppMessage(message) {
   }
 
   const isLoyal = verified ? (await countGuestBookings(booking.email || null)) >= FORMER_GUEST_MIN_BOOKINGS : false;
-  const systemPrompt = buildSystemPrompt({ propInfo, roomInfo, booking, isLoyal, channel: 'whatsapp', linksSent: conv.linksSent, locked: isLocked(conv), introduced });
+  const systemPrompt = buildSystemPrompt({ propInfo, roomInfo, booking, isLoyal, channel: 'whatsapp', linksSent: conv.linksSent, locked: isLocked(conv) || (!booking && verificationSuspended()), introduced });
 
   console.log('➡️ Appel Claude...');
   const raw = await generateAIReply(text, systemPrompt, history);

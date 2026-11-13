@@ -14,7 +14,9 @@ const AGENT_START_TIME = new Date();
 console.log('Agent démarré à:', AGENT_START_TIME.toISOString());
 
 const WEBHOOK_VERIFY_TOKEN = process.env.WEBHOOK_VERIFY_TOKEN || ''; // plus de valeur par défaut en dur
-const CLAUDE_MODEL = 'claude-sonnet-5-5';
+// Modèle principal (variable Render CLAUDE_MODEL pour en changer, ex. claude-haiku-5-5) ; COURTESY_MODEL : modèle des simples remerciements
+const CLAUDE_MODEL = (process.env.CLAUDE_MODEL || '').trim() || 'claude-sonnet-5-5';
+const COURTESY_MODEL = (process.env.COURTESY_MODEL || '').trim() || CLAUDE_MODEL;
 const WHATSAPP_API_VERSION = 'v25.0';
 const PAUSE_HOURS = Number(process.env.PAUSE_HOURS) || 12;
 const STAY_VERIFICATION = String(process.env.STAY_VERIFICATION || '').toLowerCase() !== 'off';
@@ -51,11 +53,12 @@ function applyEmailRequirement(b, res) {
   return res;
 }
 
-// ==================== IDENTIFIANTS NON SECRETS (en dur, évite des variables Render) ====================
-// À remplir ici. Une variable Render du même nom, si elle existe, reste prioritaire.
+// ==================== IDENTIFIANTS NON SECRETS ====================
+// Deux façons de les renseigner : une variable Render du même nom (prioritaire), ou remplacer la valeur '' ci-dessous par la valeur en dur.
+// Vides, ils ne produisent aucune erreur : le bot démarre mais ne peut pas envoyer d'alertes (voir les avertissements au démarrage).
 // Les secrets (jetons, clés, ADMIN_KEY...) ne vont JAMAIS ici : ils restent sur Render.
-const OWNER_PHONE = process.env.OWNER_PHONE || '+33659074675';                         // ex. '+33612345678' (numéro WhatsApp du propriétaire)
-const WHATSAPP_PHONE_ID = process.env.WHATSAPP_PHONE_ID || '1040369589162757';             // identifiant du numéro WhatsApp Business (Meta)
+const OWNER_PHONE = process.env.OWNER_PHONE || '';                         // ex. '+33612345678' (numéro WhatsApp du propriétaire)
+const WHATSAPP_PHONE_ID = process.env.WHATSAPP_PHONE_ID || '';             // identifiant du numéro WhatsApp Business (Meta)
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '';               // optionnel
 const WHATSAPP_ALERT_TEMPLATE = process.env.WHATSAPP_ALERT_TEMPLATE || ''; // optionnel : nom du modèle approuvé
 const WHATSAPP_ALERT_TEMPLATE_LANG = process.env.WHATSAPP_ALERT_TEMPLATE_LANG || 'fr';
@@ -75,6 +78,13 @@ if (!process.env.WHATSAPP_APP_SECRET) console.warn(ALLOW_UNSIGNED_WEBHOOKS
   ? '⚠️ WHATSAPP_APP_SECRET non défini : webhooks WhatsApp acceptés SANS signature (ALLOW_UNSIGNED_WEBHOOKS=true).'
   : '⛔ WHATSAPP_APP_SECRET non défini : les webhooks WhatsApp sont REFUSÉS. Définissez-le sur Render (Meta > Paramètres de l\'app > Général).');
 if (ADMIN_KEY_QUERY && process.env.ADMIN_KEY) console.warn('⚠️ Clé admin acceptée dans l\'URL (?key=) : elle reste dans les logs. Utilisez l\'en-tête x-admin-key puis ADMIN_KEY_QUERY=off.');
+// Variables indispensables : lire process.env ne garantit pas qu'elles sont renseignées, et leur absence ne provoque aucune erreur
+// (alertes silencieusement non envoyées, réponses impossibles...). Mieux vaut le voir dès le démarrage.
+if (!process.env.ANTHROPIC_KEY) console.warn('⛔ ANTHROPIC_KEY non défini : le bot ne peut répondre à personne.');
+if (!process.env.WHATSAPP_TOKEN) console.warn('⛔ WHATSAPP_TOKEN non défini : aucun message WhatsApp ne peut être envoyé (réponses, alertes, commandes).');
+if (!WHATSAPP_PHONE_ID) console.warn('⛔ WHATSAPP_PHONE_ID non défini : aucun message WhatsApp ne peut être envoyé.');
+if (!OWNER_PHONE) console.warn('⛔ OWNER_PHONE non défini : aucune alerte ni commande propriétaire (/aide, /pause, /valider...) ne fonctionnera.');
+if (!process.env.BEDS24_REFRESH_TOKEN) console.warn('⚠️ BEDS24_REFRESH_TOKEN non défini : Beds24 déconnecté' + (process.env.BEDS24_TOKEN ? ' (utilisez /setup-beds24 puis copiez le jeton dans BEDS24_REFRESH_TOKEN).' : ' (messages Airbnb/Booking, disponibilités et vérifications indisponibles).'));
 if (CORS_OPEN) console.warn('⚠️ CORS_ORIGIN=* : /api/chat est ouvert à tous les sites.');
 
 // ==================== À COMPLÉTER PAR LE PROPRIÉTAIRE ====================
@@ -85,6 +95,13 @@ const LOCK_INSTRUCTIONS = `Taper le code envoyé (Cxxxx) puis tourner la poigné
 
 // Politique pour les longs séjours (32 nuits ou plus)
 const LONG_STAY_POLICY = `Séjour de 32 nuits ou plus : ne promets AUCUN tarif ni remise. Donne la disponibilité vérifiée, puis dis que tu transmets la demande au Service Relation Client, qui l'étudiera et reviendra vers le voyageur.`;
+
+// Plafond GLOBAL d'échecs de vérification d'identité sur 1 h (tous numéros et visiteurs confondus) : au-delà, la vérification
+// automatique est suspendue pour les nouveaux voyageurs et le propriétaire est alerté (tentative de devinette probable)
+const VERIFY_FAIL_GLOBAL_LIMIT = Math.max(Number(process.env.VERIFY_FAIL_GLOBAL_LIMIT) || 30, 3);
+// Alertes d'annulation et de modification (dates / logement) de réservations confirmées
+const CANCEL_WATCH = String(process.env.CANCEL_WATCH || '').toLowerCase() !== 'off';
+const MODIFY_WATCH = String(process.env.MODIFY_WATCH || '').toLowerCase() !== 'off';
 
 // Réglages qui étaient dispersés dans le fichier d'origine
 const PENDING_WATCH = String(process.env.PENDING_WATCH || '').toLowerCase() !== 'off';
@@ -103,6 +120,10 @@ module.exports = {
   AGENT_START_TIME,
   WEBHOOK_VERIFY_TOKEN,
   CLAUDE_MODEL,
+  COURTESY_MODEL,
+  VERIFY_FAIL_GLOBAL_LIMIT,
+  CANCEL_WATCH,
+  MODIFY_WATCH,
   WHATSAPP_API_VERSION,
   PAUSE_HOURS,
   STAY_VERIFICATION,

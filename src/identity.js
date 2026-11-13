@@ -3,11 +3,37 @@
  * (extrait de l'ancien server.js ; voir server.js pour l'architecture)
  */
 
-const { getAllActiveBookings, getBookingById, getPropertyInfo, isActiveStay } = require('./beds24');
-const { MAX_BAD_EMAILS, MAX_DAY_NUMBERS, MAX_FAILED_ATTEMPTS, MAX_UNITS_MENTIONED, STAY_VERIFICATION, applyEmailRequirement } = require('./config');
+const { getActiveBookingsSafe, getAllActiveBookings, getBookingByIdSafe, getPropertyInfo, isActiveStay } = require('./beds24');
+const { MAX_BAD_EMAILS, MAX_DAY_NUMBERS, MAX_FAILED_ATTEMPTS, MAX_UNITS_MENTIONED, STAY_VERIFICATION, VERIFY_FAIL_GLOBAL_LIMIT, applyEmailRequirement } = require('./config');
+const { sendOwnerAlert } = require('./messaging');
 const { AIRBNB_LINKS, buildRoomNumbers } = require('./rooms');
+const { countHits, limitReached, rateLimit, recordHit } = require('./security');
 const { ensureConv, isLocked, lockConv, markDirty } = require('./state');
 const { bookingPhoneKeys, normalizeText, phoneKey, significantTokens, tokens } = require('./utils');
+
+// ---------- Plafond GLOBAL d'échecs de vérification ----------
+// Le blocage par numéro (MAX_FAILED_ATTEMPTS) n'empêche pas un attaquant de changer de numéro ou d'adresse IP. Ce plafond compte les échecs
+// de TOUS les numéros WhatsApp et visiteurs du chat sur 1 h : au-delà de VERIFY_FAIL_GLOBAL_LIMIT, la vérification automatique est suspendue
+// pour les nouveaux voyageurs (ceux déjà reconnus ne sont pas touchés) et le propriétaire est alerté une fois par heure.
+// Il reste /valider pour un voyageur légitime.
+const VERIFY_FAIL_WINDOW_MS = 3600 * 1000;
+const VERIFY_FAIL_KEY = 'verifyfail:global';
+
+function verificationSuspended() {
+  return limitReached(VERIFY_FAIL_KEY, VERIFY_FAIL_GLOBAL_LIMIT, VERIFY_FAIL_WINDOW_MS);
+}
+function verificationFailureCount() {
+  return countHits(VERIFY_FAIL_KEY, VERIFY_FAIL_WINDOW_MS);
+}
+function noteVerificationFailure(origin = '') {
+  recordHit(VERIFY_FAIL_KEY, VERIFY_FAIL_WINDOW_MS);
+  if (verificationSuspended() && rateLimit('verifyfail:alert', 1, VERIFY_FAIL_WINDOW_MS)) {
+    console.warn(`🚨 Plafond global d'échecs de vérification atteint (${VERIFY_FAIL_GLOBAL_LIMIT} en 1 h) : vérification automatique suspendue`);
+    sendOwnerAlert(`🚨 Trop d'échecs de vérification d'identité : ${VERIFY_FAIL_GLOBAL_LIMIT} en 1 h, tous numéros et visiteurs confondus (dernier : ${origin || 'inconnu'}). `
+      + `Possible tentative de devinette : la vérification automatique est SUSPENDUE pour les nouveaux voyageurs, le temps que le rythme redescende (les voyageurs déjà reconnus ne sont pas touchés). `
+      + `Pour un voyageur légitime : /valider bIDRÉSERVATION numéro. Réglage : VERIFY_FAIL_GLOBAL_LIMIT.`).catch(() => {});
+  }
+}
 
 // ---------- Vérification d'identité ----------
 // Règle : 2 critères sur 4 (nom, téléphone, email, séjour), comparaison EXACTE (plus de sous-chaînes).
@@ -185,6 +211,7 @@ function registerFailedAttempt(conv, text, from, force = false) {
   if (now - (conv.failedAt || 0) > 24 * 3600 * 1000) conv.failedAttempts = 0; // le compteur retombe après 24 h sans échec (le blocage, lui, dure LOCK_DAYS)
   conv.failedAttempts = (conv.failedAttempts || 0) + 1;
   conv.failedAt = now;
+  noteVerificationFailure('WhatsApp ...' + String(from).slice(-3));
   if (conv.failedAttempts >= MAX_FAILED_ATTEMPTS && !isLocked(conv)) {
     lockConv(conv);
     console.warn('🔒 Vérification WhatsApp bloquée (trop de tentatives) pour ...' + String(from).slice(-3));
@@ -197,17 +224,31 @@ async function identifyWhatsAppGuest(from, history, text) {
     const conv = ensureConv(from);
 
     // Voyageur déjà vérifié (automatiquement ou par /valider du propriétaire)
+    // IMPORTANT : la vérification n'est effacée que si Beds24 a RÉPONDU que la réservation n'est plus valable (annulée, terminée...).
+    // Si Beds24 est injoignable, on la garde (sans donner de code pour ce message) : une panne ne doit pas faire perdre l'accès au voyageur,
+    // ni annuler un /valider du propriétaire.
     if (conv.verifiedBookingId) {
-      let known = (await getAllActiveBookings()).find(x => String(x.id) === String(conv.verifiedBookingId));
+      const act = await getActiveBookingsSafe(); // en cas de panne : dernière liste connue (30 min au plus)
+      let known = act.data.find(x => String(x.id) === String(conv.verifiedBookingId)) || null;
+      let definitive = act.ok;
       if (!known) {
-        const b = await getBookingById(conv.verifiedBookingId);
-        if (b && String(b.status || '').toLowerCase() !== 'cancelled' && isActiveStay(b)) known = b;
+        const r = await getBookingByIdSafe(conv.verifiedBookingId);
+        if (r.ok) {
+          definitive = true; // Beds24 a répondu : cette réponse fait foi
+          const b = r.data;
+          if (b && String(b.status || '').toLowerCase() === 'confirmed' && isActiveStay(b)) known = b;
+        }
       }
       if (known) return known;
+      if (!definitive) {
+        console.warn('⚠️ Beds24 injoignable : vérification conservée, aucun code donné pour ce message ...' + String(from).slice(-3));
+        return null;
+      }
       conv.verifiedBookingId = null;
       markDirty();
     }
     if (isLocked(conv)) return null;
+    if (verificationSuspended()) return null; // plafond global d'échecs atteint : seulement /valider
 
     const bookings = await getAllActiveBookings();
     if (!bookings.length) return null;
@@ -223,6 +264,7 @@ async function identifyWhatsAppGuest(from, history, text) {
     if (badEmails.size > MAX_BAD_EMAILS) {
       lockConv(conv);
       markDirty();
+      noteVerificationFailure('WhatsApp ...' + String(from).slice(-3));
       console.warn('🔒 Vérification WhatsApp bloquée (trop d\'emails essayés) pour ...' + String(from).slice(-3));
       return null;
     }
@@ -265,6 +307,10 @@ async function candidateBookings(text, limit = 3) {
 }
 
 module.exports = {
+  VERIFY_FAIL_WINDOW_MS,
+  verificationSuspended,
+  verificationFailureCount,
+  noteVerificationFailure,
   lastNameTokens,
   webIdentityScore,
   verifyGuestIdentity,
