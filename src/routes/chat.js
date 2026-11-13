@@ -8,7 +8,7 @@ const { runConversation } = require('../ai');
 const { ALERT_META, notifyOwner, parseAlert } = require('../alerts');
 const { countGuestBookings, getPropertyInfo } = require('../beds24');
 const { CHAT_DAILY_LIMIT, CHAT_IP_DAILY_LIMIT, CORS_OPEN, FORMER_GUEST_MIN_BOOKINGS, corsOrigins } = require('../config');
-const { verifyGuestIdentity } = require('../identity');
+const { noteVerificationFailure, verificationSuspended, verifyGuestIdentity } = require('../identity');
 const { sendOwnerAlert } = require('../messaging');
 const { buildSystemPrompt, ensureSignature } = require('../prompts');
 const { applyAddressPolicy, limitReached, rateLimit, recordHit } = require('../security');
@@ -36,13 +36,16 @@ function collapseVisitorTurns(msgs) {
 }
 
 // Dernier filet : aucun code ne doit sortir du chat web, même si le modèle se trompe
+// UNE seule passe, secrets triés du plus long au plus court : sinon un code court (ex. 1234) contenu dans un mot de passe plus long
+// (ex. abc12345) était remplacé en premier et laissait fuiter un morceau du mot de passe (abc[...]5).
 function redactSecrets(text, propInfo) {
-  let out = String(text || '');
-  const secrets = [propInfo?.digicode, propInfo?.wifi_password, ...(propInfo?.rooms || []).flatMap(r => [r.codeBoite, r.wifi])]
+  const secrets = [...new Set([propInfo?.digicode, propInfo?.wifi_password, ...(propInfo?.rooms || []).flatMap(r => [r.codeBoite, r.wifi])]
     .map(s => String(s || '').trim())
-    .filter(s => s.length >= 4 && !/^(19|20)\d\d$/.test(s)); // pas une année
-  for (const s of secrets) out = out.split(s).join('[information réservée à WhatsApp]');
-  return out;
+    .filter(s => s.length >= 4 && !/^(19|20)\d\d$/.test(s)))] // pas une année
+    .sort((a, b) => b.length - a.length);
+  if (!secrets.length) return String(text || '');
+  const re = new RegExp(secrets.map(s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'), 'gi');
+  return String(text || '').replace(re, '[information réservée à WhatsApp]');
 }
 
 // Un navigateur envoie toujours l'en-tête Origin sur un POST inter-sites : une requête sans Origin, ou venue d'un autre site, est refusée.
@@ -106,9 +109,11 @@ app.post('/api/chat', async (req, res) => {
       const vKey = 'chatverify:' + req.ip;
       if (attempted && limitReached(vKey, 10, 3600 * 1000)) {
         console.warn('🔒 Chat web : trop d\'échecs de vérification depuis cette IP, vérification suspendue');
+      } else if (attempted && verificationSuspended()) {
+        console.warn('🔒 Chat web : plafond global d\'échecs de vérification atteint, vérification suspendue');
       } else {
         activeBooking = await verifyGuestIdentity({ name: guestName, phone: guestPhone, email: guestEmail });
-        if (attempted && !activeBooking) recordHit(vKey, 3600 * 1000);
+        if (attempted && !activeBooking) { recordHit(vKey, 3600 * 1000); noteVerificationFailure('chat web'); }
       }
       if (activeBooking && propInfo) roomInfo = propInfo.rooms.find(r => String(r.id) === String(activeBooking.roomId)) || null;
     }
@@ -130,7 +135,7 @@ app.post('/api/chat', async (req, res) => {
 
     console.log('API/chat | identifié:', !!activeBooking, '| messages:', messages.length);
 
-    const raw = await runConversation({ system: systemPromptText, messages, maxTokens: 700 });
+    const raw = await runConversation({ system: systemPromptText, messages, maxTokens: 700, timeoutMs: 25000 }); // le visiteur attend : délai par essai plus court
     const parsed = raw ? parseAlert(raw, lastUserText) : null;
     if (!parsed || !parsed.reply) return res.status(502).json({ error: 'Service momentanément indisponible' });
     parsed.reply = ensureSignature(redactSecrets(applyAddressPolicy(parsed.reply, false), propInfo), introduced); // jamais l'adresse exacte ni un code sur le chat web
