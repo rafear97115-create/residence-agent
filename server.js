@@ -28,6 +28,11 @@
  * - PENDING_ACK=on (optionnel, désactivé par défaut) : accusé de réception automatique au voyageur Airbnb/Booking
  *   qui a fait une demande en attente (aucune promesse, la demande est dite "transmise au propriétaire")
  *
+ * - CLAUDE_MODEL (optionnel, défaut claude-sonnet-5-5) : modèle des réponses. COURTESY_MODEL (optionnel, défaut = CLAUDE_MODEL) : modèle des simples
+ *   remerciements (ex. claude-haiku-5-5, moins cher et plus rapide). Une valeur inexistante fait échouer TOUTES les réponses : tester après changement.
+ * - VERIFY_FAIL_GLOBAL_LIMIT (optionnel, défaut 30) : échecs de vérification d'identité par heure, tous numéros et visiteurs confondus ; au-delà, la
+ *   vérification automatique est suspendue pour les nouveaux voyageurs et le propriétaire est alerté (/valider reste possible)
+ * - CANCEL_WATCH=off / MODIFY_WATCH=off (optionnels) : coupent les alertes d'annulation / de modification (dates, logement) de réservations
  * - STATE_FILE (optionnel) fichier JSON où le bot garde ses pauses, ses vérifications et les alertes déjà envoyées, pour survivre
  *   à un redémarrage. Défaut : /var/data/state.json si ce dossier existe (disque persistant Render), sinon ./state.json
  *   (ATTENTION : sans disque persistant Render, ce fichier est effacé à chaque redémarrage). Aucun texte de message n'y est écrit.
@@ -109,7 +114,7 @@ const path = require('path');
 const { executeTool, isPureCourtesy } = require('./src/ai');
 const { fallbackCategory, fmtDate, formatOwnerAlert, parseAlert } = require('./src/alerts');
 const { bookingPhone, countGuestBookings, countsAsFormerStay, detectPlatform, isActiveStay, isBlockBooking } = require('./src/beds24');
-const { bookingEventKind, checkNewBookings, formatBookingAlert } = require('./src/bookings-watch');
+const { bookingEventKind, checkNewBookings, formatBookingAlert, seedFingerprints } = require('./src/bookings-watch');
 const { CORS_OPEN, applyEmailRequirement, corsOrigins, hasRealEmail } = require('./src/config');
 const { buildWaCtx, countDayNumbers, extractUnits, looksLikeIdentityAttempt, pickBestBooking, registerFailedAttempt, stayDatesMatch, waIdentityScore, webIdentityScore } = require('./src/identity');
 const { flattenForTemplate } = require('./src/messaging');
@@ -139,6 +144,22 @@ require('./src/routes/webhook').register(app);
 require('./src/routes/admin').register(app);
 require('./src/routes/chat').register(app);
 
+// Racine : simple signe de vie (plus de page de démonstration : le chat se trouve sur le site, via chat-widget.js)
+app.get('/', (req, res) => res.type('text/plain').send("Assistant virtuel — Résidence de l'Industrie : service en ligne."));
+
+// Route inconnue : réponse JSON courte (au lieu de la page HTML d'Express)
+app.use((req, res) => res.status(404).json({ error: 'Introuvable' }));
+
+// Gestionnaire d'erreurs : JSON invalide, corps trop gros, bug imprévu... jamais de trace d'erreur envoyée au client
+// (Express affiche sinon la pile d'erreurs complète quand NODE_ENV n'est pas "production"). Le détail reste dans les logs, sans le contenu des messages.
+app.use((err, req, res, next) => {
+  const status = Number(err && (err.status || err.statusCode)) || 500;
+  console.error(`Erreur requête ${req.method} ${req.path} :`, status, scrub(err && (err.type || err.message) || err));
+  if (res.headersSent) return next(err);
+  const safe = status >= 400 && status < 500 ? status : 500;
+  res.status(safe).json({ error: safe === 413 ? 'Message trop volumineux' : safe < 500 ? 'Requête invalide' : 'Erreur interne' });
+});
+
 // ==================== DÉMARRAGE ====================
 
 module.exports = {
@@ -157,6 +178,10 @@ if (require.main === module) {
   loadState();
   setInterval(saveState, 30 * 1000).unref(); // filet : sauvegarde régulière en plus des sauvegardes déclenchées par les événements
   for (const sig of ['SIGTERM', 'SIGINT']) process.on(sig, () => { saveState(); process.exit(0); }); // Render arrête l'ancienne instance avec SIGTERM
+  // Filets de sécurité : une promesse rejetée oubliée est journalisée (le bot continue) ; une exception non rattrapée laisse le bot dans un état
+  // inconnu : on sauvegarde puis on s'arrête, Render le redémarre aussitôt.
+  process.on('unhandledRejection', reason => console.error('Rejet de promesse non géré :', scrub(reason && reason.message || reason)));
+  process.on('uncaughtException', err => { console.error('Exception non rattrapée, arrêt :', scrub(err && err.stack || err)); saveState(); process.exit(1); });
 
   // Polling Beds24 toutes les 2 minutes
   setInterval(fetchAndReplyBeds24Messages, 2 * 60 * 1000);
@@ -164,6 +189,8 @@ if (require.main === module) {
   // Demandes en attente et réservations directes (premier passage 20 s après le démarrage, puis toutes les 2 minutes)
   setInterval(checkNewBookings, 2 * 60 * 1000);
   setTimeout(checkNewBookings, 20000);
+  // Mémorise les dates/logement des réservations confirmées déjà existantes (détection des modifications), 45 s après le démarrage
+  setTimeout(seedFingerprints, 45000).unref();
 
   const PORT = process.env.PORT || 3000;
   app.listen(PORT, () => console.log('Serveur démarré sur port', PORT));

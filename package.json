@@ -1,10 +1,18 @@
 {
   "name": "residence-agent",
-  "version": "1.0.0",
+  "version": "1.1.0",
+  "description": "Assistant virtuel de la Résidence de l'Industrie (WhatsApp, Airbnb/Booking via Beds24, chat du site)",
+  "private": true,
   "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node test/run.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
   "dependencies": {
-    "express": "^4.18.2",
     "cors": "^2.8.5",
-    "node-fetch": "^3.3.2"
+    "express": "^4.18.2"
   }
 }

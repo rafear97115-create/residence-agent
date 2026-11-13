@@ -1,0 +1,14 @@
+# Dépendances (réinstallées par "npm install")
+node_modules/
+
+# État du bot : contient des numéros de téléphone, des vérifications d'identité, des blocages. Ne JAMAIS l'envoyer sur GitHub.
+state.json
+state.json.tmp
+
+# Secrets éventuels en local
+.env
+.env.*
+
+# Divers
+*.log
+.DS_Store
