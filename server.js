@@ -5,7 +5,12 @@
  * - SECRETS (optionnel) : UN seul JSON regroupant les autres variables, ex. {"ANTHROPIC_KEY":"...","WHATSAPP_TOKEN":"..."}
  *   (voir src/secrets.js ; une variable Render séparée du même nom reste prioritaire)
  * Existantes : ANTHROPIC_KEY, BEDS24_REFRESH_TOKEN, BEDS24_TOKEN, WHATSAPP_PHONE_ID,
- * WHATSAPP_TOKEN, OWNER_PHONE
+ * WHATSAPP_TOKEN, OWNER_PHONE (ces variables peuvent aussi être regroupées dans SECRETS)
+ * - EMERGENCY_PHONE : numéro d'urgence donné SEULEMENT aux voyageurs vérifiés (WhatsApp) ou ayant un séjour en cours (Airbnb/Booking).
+ *   Jamais écrit dans le code. Vide = le bot ne donne aucun numéro d'urgence.
+ * - ADDRESS_FULL : adresse exacte donnée SEULEMENT à un voyageur WhatsApp vérifié dont le séjour est en cours. Jamais écrite dans le code. Vide = jamais donnée.
+ * - AIRBNB_URL (optionnel) : lien Airbnb unique de l'immeuble (défaut : le lien du logement 1, qui mène à l'annonce de l'ensemble des logements)
+ * - PRIVACY_URL (optionnel) : page « données personnelles » du site, citée dans le premier message du bot (WhatsApp, Airbnb, Booking)
  * - ADMIN_KEY (OBLIGATOIRE pour /status, /test-*, /setup-beds24, /debug-beds24)
  * appel : en-tête "x-admin-key: ..." ou ?key=...
  * - WHATSAPP_APP_SECRET (OBLIGATOIRE) secret de l'app Meta (Paramètres > Général) : vérification de signature des webhooks.
@@ -50,6 +55,7 @@
  * - CHAT_IP_DAILY_LIMIT (optionnel, défaut 100) : nombre maximum de requêtes /api/chat par 24 h et par adresse IP,
  *   pour qu'une seule connexion ne puisse pas épuiser le plafond global
  *   Le chat du site ne donne JAMAIS de codes d'accès (digicode, boîte à clé, Wi-Fi) ni de numéro d'urgence : tout passe par WhatsApp.
+ *   Il ne vérifie l'identité de personne : le nom, le téléphone ou l'email envoyés par un navigateur sont ignorés.
  *   /api/chat refuse aussi les requêtes dont l'en-tête Origin n'est pas dans CORS_ORIGIN (ou sans Origin).
  *   /api/chat ne lit que les messages du VISITEUR : les "réponses de l'assistant" envoyées par le navigateur sont ignorées.
  * - OWNER_REPLY_SIGNATURE (optionnel) : signature ajoutée aux messages envoyés avec /repondre.
@@ -68,7 +74,7 @@
  *
  * COMMANDES PROPRIÉTAIRE (à envoyer au numéro du bot depuis OWNER_PHONE) : /aide les explique, avec des exemples
  * /aide : la liste des commandes, expliquées
- * /sejour [jours] : séjours en cours et à venir (30 jours par défaut, 365 au maximum)
+ * /sejour [jours] : trois listes : départs ce jour, séjours en cours, arrivées à venir (30 jours par défaut, 365 au maximum)
  * /statut : état du bot (en ligne depuis..., conversations en pause, numéros bloqués, voyageurs reconnus, réglages actifs)
  * /repondre numéro|bIDRÉSERVATION message : envoie VOTRE réponse au voyageur (WhatsApp, ou Airbnb/Booking via Beds24),
  *   à utiliser en cas de réelle nécessité. Le destinataire est OBLIGATOIRE (plus de destinataire par défaut).
@@ -116,13 +122,13 @@ const { fallbackCategory, fmtDate, formatOwnerAlert, parseAlert } = require('./s
 const { bookingPhone, countGuestBookings, countsAsFormerStay, detectPlatform, isActiveStay, isBlockBooking } = require('./src/beds24');
 const { bookingEventKind, checkNewBookings, formatBookingAlert, seedFingerprints } = require('./src/bookings-watch');
 const { CORS_OPEN, applyEmailRequirement, corsOrigins, hasRealEmail } = require('./src/config');
-const { buildWaCtx, countDayNumbers, extractUnits, looksLikeIdentityAttempt, pickBestBooking, registerFailedAttempt, stayDatesMatch, waIdentityScore, webIdentityScore } = require('./src/identity');
+const { buildWaCtx, countDayNumbers, detectNameSpray, extractUnits, looksLikeIdentityAttempt, pickBestBooking, registerFailedAttempt, stayDatesMatch, waIdentityScore } = require('./src/identity');
 const { flattenForTemplate } = require('./src/messaging');
 const { catchupDecision, fetchAndReplyBeds24Messages } = require('./src/platforms');
-const { CACHE_BREAK, bookingFormatRules, buildSystemPrompt, ensureSignature, hasIntro, toSystemBlocks } = require('./src/prompts');
+const { CACHE_BREAK, bookingFormatRules, buildSystemPrompt, ensurePrivacyNote, ensureSignature, hasIntro, toSystemBlocks } = require('./src/prompts');
 const { beds24UnitSheet, buildRoomNumbers, flattenFeatures } = require('./src/rooms');
 const { collapseVisitorTurns, redactSecrets, sanitizeChatMessages } = require('./src/routes/chat');
-const { applyAddressPolicy } = require('./src/security');
+const { applyAddressPolicy, applyPhonePolicy } = require('./src/security');
 const { conversations, ensureConv, getHistory, introducedBookings, isLocked, loadState, lockConv, pauses, restoreState, saveState, seenBookingEvents, snapshotState } = require('./src/state');
 const { bookingPhoneKeys, calendarHint, logText, normalizeWaNumber, phoneKey, scrub } = require('./src/utils');
 
@@ -163,7 +169,7 @@ app.use((err, req, res, next) => {
 // ==================== DÉMARRAGE ====================
 
 module.exports = {
-  app, isPureCourtesy, parseAlert, fallbackCategory, phoneKey, normalizeWaNumber, webIdentityScore,
+  app, isPureCourtesy, parseAlert, fallbackCategory, phoneKey, normalizeWaNumber, detectNameSpray, ensurePrivacyNote, applyPhonePolicy,
   waIdentityScore, sanitizeChatMessages, buildSystemPrompt, executeTool, calendarHint, bookingFormatRules,
   applyAddressPolicy, isActiveStay, stayDatesMatch, extractUnits, hasIntro, ensureSignature, buildRoomNumbers,
   flattenForTemplate, catchupDecision, formatOwnerAlert, fmtDate, detectPlatform, bookingPhone,

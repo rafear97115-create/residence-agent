@@ -1,5 +1,39 @@
 # Modifications
 
+## Version 1.2 (13/11/2026, soir)
+### Sécurité
+1. **Liste de noms** : un message contenant les noms de famille de plusieurs voyageurs différents ne valide plus personne (le critère « nom » est ignoré,
+   la tentative compte comme un échec). Avant, nom + dates + logement devinés depuis un numéro inconnu pouvaient donner les codes.
+   Deux réservations au même nom de famille ne sont pas considérées comme une liste (`detectNameSpray`, `identity.js`).
+2. **Numéro d'urgence** : plus jamais écrit dans les consignes données aux voyageurs non vérifiés (il y figurait dans la phrase « NE PAS donner le numéro… »).
+   Nouveau filet en sortie (`applyPhonePolicy`, `security.js`) : retiré de toute réponse destinée à un voyageur non vérifié, quelle que soit sa présentation
+   (espaces, points, +33, 0033…). Appliqué sur WhatsApp, Airbnb/Booking et chat du site.
+3. **Données personnelles sorties du code** : numéro d'urgence → variable `EMERGENCY_PHONE` ; adresse exacte → variable `ADDRESS_FULL`. Vides : le bot ne donne
+   ni l'un ni l'autre (avertissement au démarrage). Le filtre d'adresse se construit aussi à partir de `ADDRESS_FULL`. Un test vérifie qu'aucun numéro de
+   téléphone ni l'adresse n'est écrit dans le code.
+4. **Prospects bloqués à tort** : demander une disponibilité avec des dates ou un logement n'est plus compté comme une tentative de devinette (avant : blocage
+   de 90 jours après 5 messages, et plafond global de 30 échecs/heure consommé). Distinction : échec « fort » (nom/email qui correspond presque, texte suspect :
+   5 maximum) et échec « faible » (aucune réservation ne correspond : blocage seulement au-delà de `MAX_SOFT_ATTEMPTS` = 25 en 24 h, sans effet sur le plafond global).
+   Un voyageur dont le numéro WhatsApp correspond à la réservation n'est jamais compté.
+
+### Chat du site
+- **Ne vérifie plus personne** : nom, téléphone et email envoyés par le navigateur sont ignorés (ils ne débloquaient aucun code mais faisaient révéler dates et logement
+  d'un séjour). La réponse ne contient plus `guestVerified`. Le formulaire « J'ai une réservation en cours » est retiré du widget ; il envoie un identifiant de session aléatoire.
+- Le widget affiche une information « assistant automatisé (IA), messages transmis à un prestataire d'IA » et, avec `data-privacy="https://…"`, un lien « Données personnelles ».
+
+### RGPD
+- Nouveau fichier `RGPD.md` : textes prêts à reprendre dans la politique de confidentialité et registre des traitements.
+- Variable `PRIVACY_URL` (optionnelle) : le premier message du bot (WhatsApp, Airbnb, Booking) précise qu'il s'agit d'un assistant automatisé et donne le lien.
+- Conservation d'un numéro WhatsApp vérifié : 30 jours après son dernier message (avant : 100 jours). Numéro bloqué : inchangé (`LOCK_DAYS` + 10 jours).
+
+### Airbnb, Beds24, commandes
+- **Un seul lien Airbnb** (`AIRBNB_URL`, défaut : le lien du logement 1, qui mène à l'annonce de l'immeuble). Plus de lien par logement : le bot cite les logements libres par leur nom.
+- **Panne Beds24** : le bot ne répond plus à la place du propriétaire. Message Airbnb/Booking reçu pendant une panne = une alerte avec le texte du message (« répondez dans Airbnb / Booking »),
+  marqué traité (pas de réponse tardive par-dessus la vôtre). Panne détectée à la relève (2 échecs de suite, environ 4 min) ou à la vérification d'un voyageur WhatsApp : alerte (1 par heure au plus),
+  puis message de retour à la normale.
+- **`/sejour`** : trois listes : départs ce jour, en cours (arrivées du jour comprises), à venir (30 prochains jours par défaut).
+- Node 22 (`engines`, `.nvmrc`).
+
 ## Version du 13/11/2026
 ### Corrections prioritaires
 1. **`public/index.html` supprimé** : la page publique affichait le numéro d'urgence et l'adresse exacte, et ses « réponses instantanées » (panne, bloqué dehors)
