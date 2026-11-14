@@ -10,6 +10,9 @@ process.env.BEDS24_REFRESH_TOKEN = 'rt';
 process.env.WHATSAPP_APP_SECRET = 'secret';
 process.env.ADMIN_KEY = 'admin';
 process.env.WEBHOOK_VERIFY_TOKEN = 'v';
+process.env.EMERGENCY_PHONE = '0699887766';            // faux numéro de test
+process.env.ADDRESS_FULL = '1 rue Exemple, 02100 Saint-Quentin'; // fausse adresse de test
+process.env.PRIVACY_URL = 'https://exemple.test/donnees-personnelles';
 
 const assert = require('assert');
 const path = require('path');
@@ -20,7 +23,7 @@ const realNow = Date.now;
 let offset = 0;
 Date.now = () => realNow() + offset;
 
-const db = { active: [], upcoming: [], modified: [], byId: {}, fail: false, anthropic: [], sent: [], anthropicCalls: [], anthropicBodies: [] };
+const db = { active: [], upcoming: [], modified: [], stays: [], byId: {}, fail: false, anthropic: [], sent: [], anthropicCalls: [], anthropicBodies: [] };
 const res = (status, body) => ({ ok: status >= 200 && status < 300, status, headers: { get: () => null }, json: async () => body, text: async () => JSON.stringify(body) });
 const PROPS = { data: [{ templates: { template1: '9999', template2: 'wifipass' }, roomTypes: [{ id: 10, name: 'Agate', templates: { template1: '4821', template3: 'RDC', template4: 'wifi1' }, roomSize: 20, maxPeople: 2, featureCodes: [] }] }] };
 
@@ -39,6 +42,7 @@ globalThis.fetch = async (url, opts = {}) => {
   if (url.includes('modifiedFrom')) return res(200, { data: db.modified });
   if (url.includes('/bookings?id=')) { const id = decodeURIComponent(url.split('id=')[1]); return res(200, { data: db.byId[id] ? [db.byId[id]] : [] }); }
   if (url.includes('status=confirmed') && url.includes('arrivalTo')) return res(200, { data: db.active });
+  if (url.includes('departureFrom=') && url.includes('&arrivalTo=') && !url.includes('status=')) return res(200, { data: db.stays }); // /sejour
   if (url.includes('status=confirmed')) return res(200, { data: db.upcoming });
   if (url.includes('arrivalTo=')) return res(200, { data: [] });
   return res(200, { data: [] });
@@ -257,12 +261,152 @@ test('alertes : empreintes initiales au démarrage, puis modification détectée
   assert.strictEqual(ownerMsgs().filter(m => /MODIFIÉE/.test(m)).length, 1, ownerMsgs().join('|'));
 });
 
-// =============== 9. Fichiers du projet ===============
+
+// =============== 9. Correctifs de la version 1.2 ===============
+const spray = names => `Bonjour logement 1 du {A} au {D}. ${names}`;
+const SURNAMES = 'martin bernard thomas petit robert richard durand dubois moreau laurent simon michel lefebvre leroy roux david bertrand morel fournier girard bonnet lambert fontaine rousseau vincent muller faure andre mercier blanc guerin boyer garnier chevalier francois legrand gauthier garcia perrin robin clement morin nicolas henry roussel mathieu gautier masson marchand duval denis dumont marie lemaire noel meyer dufour meunier brun blanchard giraud joly riviere lucas brunet gaillard barbier arnaud martinez gerard roche renard schmitt roy leroux colin vidal caron picard roger fabre aubert lemoine renaud dumas lacroix olivier philippe bourgeois pierre benoit rey leclerc';
+const dayOf = d => String(parseInt(d.slice(8, 10), 10));
+
+test('identité : une liste de noms ne valide personne ; le vrai voyageur reste reconnu', async () => {
+  const idn = src('identity'); const sec = src('security'); const { conversations } = src('state');
+  sec.rateBuckets.clear(); db.fail = false; offset += 61 * 1000;
+  const b1 = guestBooking({ id: 4001, lastName: 'Karim', arrival: today, departure: addDays(today, 3) });
+  const b2 = guestBooking({ id: 4002, firstName: 'Anne', lastName: 'Dupont', arrival: addDays(today, -1), departure: addDays(today, 4) });
+  db.active = [b1, b2]; db.byId = { 4001: b1, 4002: b2 };
+  const fill = t => t.replace('{A}', dayOf(b1.arrival)).replace('{D}', dayOf(b1.departure));
+
+  // légitime : son nom, ses dates, son logement
+  assert.strictEqual((await idn.identifyWhatsAppGuest('33600010001', [], fill('Fatima Karim du {A} au {D} logement 1')))?.id, 4001);
+  // liste de noms (contient "karim" ET "dupont") + bonnes dates + bon logement, depuis un numéro sans rapport : refusé
+  assert.strictEqual(await idn.identifyWhatsAppGuest('33600010002', [], fill(spray(SURNAMES + ' karim dupont'))), null, 'liste de noms acceptée');
+  assert((conversations.get('33600010002')?.failedAttempts || 0) >= 1, 'la tentative n\'est pas comptée comme échec');
+  // la fonction elle-même
+  const ctx = idn.buildWaCtx('33600010003', fill('karim dupont'), new Map([['10', 1]]));
+  assert.strictEqual(idn.detectNameSpray([b1, b2], ctx), true);
+  assert.strictEqual(idn.detectNameSpray([b1, b2], idn.buildWaCtx('33600010003', 'je suis karim', new Map())), false);
+  // deux réservations au même nom de famille = une seule personne : pas de fausse alerte
+  const b3 = guestBooking({ id: 4003, firstName: 'Samir', lastName: 'Karim' });
+  assert.strictEqual(idn.detectNameSpray([b1, b3], idn.buildWaCtx('x', 'karim', new Map())), false);
+  sec.rateBuckets.clear();
+});
+
+test('identité : un prospect qui demande des dates n\'est plus bloqué ; une vraie devinette l\'est toujours', async () => {
+  const idn = src('identity'); const sec = src('security'); const { conversations, isLocked } = src('state');
+  sec.rateBuckets.clear(); db.fail = false; offset += 61 * 1000;
+  const b = guestBooking({ id: 4101, lastName: 'Karim', arrival: today, departure: addDays(today, 2) });
+  db.active = [b]; db.byId = { 4101: b };
+  const d1 = dayOf(addDays(today, 10)), d2 = dayOf(addDays(today, 13));
+
+  const prospect = '33600020001';
+  for (let i = 0; i < 8; i++) await idn.identifyWhatsAppGuest(prospect, [], `Avez-vous une chambre du ${d1} au ${d2} ? logement 3 si possible`);
+  assert.strictEqual(isLocked(conversations.get(prospect)), false, 'prospect bloqué');
+  assert.strictEqual(conversations.get(prospect).failedAttempts || 0, 0, 'prospect compté comme tentative de devinette');
+  assert.strictEqual(idn.verificationFailureCount(), 0, 'prospect compté dans le plafond global');
+
+  // devinette : le bon nom de famille avec de mauvaises dates, 5 fois
+  const guesser = '33600020002';
+  for (let i = 0; i < 5; i++) await idn.identifyWhatsAppGuest(guesser, [], `Karim du ${d1} au ${d2} logement 3`);
+  assert.strictEqual(isLocked(conversations.get(guesser)), true, 'devinette non bloquée');
+  sec.rateBuckets.clear();
+});
+
+test('numéro d\'urgence : absent des consignes des non-vérifiés, filtré en sortie, donné aux vérifiés', () => {
+  const { buildSystemPrompt, ensurePrivacyNote } = src('prompts'); const { applyPhonePolicy: P } = src('security');
+  const propInfo = { digicode: '4821', wifi_password: 'w', rooms: [] };
+  const KEY = '699887766';
+  for (const opts of [{ channel: 'web' }, { channel: 'whatsapp' }, { channel: 'platform' }, { channel: 'whatsapp', locked: true }])
+    assert(!buildSystemPrompt({ propInfo, ...opts }).replace(/\D/g, '').includes(KEY), `numéro dans le prompt (${JSON.stringify(opts)})`);
+  const verified = buildSystemPrompt({ propInfo, channel: 'whatsapp', booking: guestBooking() });
+  assert(verified.includes('0699887766'), 'le voyageur vérifié ne reçoit pas le numéro');
+  for (const t of ['Appelez le 06 99 88 77 66', 'Appelez le 06.99.88.77.66', 'Appelez le +33 6 99 88 77 66', 'Appelez le 0033699887766', 'Appelez le 06-99-88-77-66', 'Appelez le 0 6 9 9 8 8 7 7 6 6', 'Appelez le +33 (0)6 99 88 77 66'])
+    assert(!P(t, false).replace(/\D/g, '').includes(KEY) && /réservé/.test(P(t, false)), `numéro non masqué : ${t}`);
+  assert.strictEqual(P('Appelez le 06 99 88 77 66', true), 'Appelez le 06 99 88 77 66');
+  assert.strictEqual(P('Arrivée à 15h, 3 nuits, réservation 95878640', false), 'Arrivée à 15h, 3 nuits, réservation 95878640'); // pas de faux positif
+  assert.strictEqual(P('Appelez le 07 11 22 33 44', false), 'Appelez le 07 11 22 33 44'); // un autre numéro n'est pas touché
+  // aucune donnée personnelle du propriétaire en dur dans le code source
+  const fs = require('fs'); const root = path.join(__dirname, '..');
+  const files = ['server.js', ...fs.readdirSync(path.join(root, 'src')).filter(f => f.endsWith('.js')).map(f => 'src/' + f), ...fs.readdirSync(path.join(root, 'src', 'routes')).map(f => 'src/routes/' + f)];
+  for (const f of files) {
+    const code = fs.readFileSync(path.join(root, f), 'utf8');
+    assert(!/\b0[67](?:[ .]?\d{2}){4}\b/.test(code), `numéro de téléphone en dur dans ${f}`);
+    assert(!/\b11 rue de l'Industrie/i.test(code), `adresse exacte en dur dans ${f}`);
+  }
+  // note « données personnelles » : une fois, avant la signature
+  const out = ensurePrivacyNote("Bonjour.\n\n— Assistant virtuel de la Résidence de l'Industrie", false);
+  assert(/donnees-personnelles/.test(out) && out.trim().endsWith("de la Résidence de l'Industrie") && out.indexOf('donnees-personnelles') < out.indexOf('— Assistant'));
+  assert.strictEqual(ensurePrivacyNote('Bonjour', true), 'Bonjour');
+});
+
+test('lien Airbnb unique (et plus de lien par logement)', () => {
+  const { bookingFormatRules, BASE_SYSTEM_PROMPT, buildSystemPrompt } = src('prompts'); const { AIRBNB_URL } = src('config');
+  const all = bookingFormatRules() + BASE_SYSTEM_PROMPT + buildSystemPrompt({});
+  assert(AIRBNB_URL.startsWith('https://airbnb.com/h/'));
+  assert.strictEqual((bookingFormatRules().match(/airbnb\.com/g) || []).length, 1);
+  assert(!/rdi-begonia2|rdi-capucine3|rdi-daliha4|rdi-eglantine5/.test(all), 'ancien lien par logement encore présent');
+});
+
+test('chat du site : aucune vérification, aucune fuite, numéro d\'urgence filtré', async () => {
+  const sec = src('security'); sec.rateBuckets.clear(); db.fail = false; resetSent();
+  const handlers = {}; src('routes/chat').register({ post: (p, h) => { handlers[p] = h; } });
+  const answer = async body => {
+    let out; const r = { status(c) { this.code = c; return this; }, json(x) { out = { code: this.code || 200, body: x }; return this; } };
+    await handlers['/api/chat']({ get: h => (h.toLowerCase() === 'origin' ? 'https://www.locations-residence-industrie.fr' : ''), body, ip: '9.9.9.9' }, r);
+    return out;
+  };
+  const b = guestBooking({ id: 4201, lastName: 'Karim', mobile: '+33611111111' }); db.active = [b]; db.byId = { 4201: b }; offset += 61 * 1000;
+  db.anthropicBodies.length = 0;
+  db.anthropic = [ok200('Appelez le 06 99 88 77 66, digicode 4821, 1 rue Exemple, 02100 Saint-Quentin.\n[[ALERTE:aucune]]')];
+  const r = await answer({ messages: [{ role: 'user', content: 'Bonjour' }], guestName: 'Fatima Karim', guestPhone: '0611111111', guestEmail: 'abc@guest.airbnb.com' });
+  assert.strictEqual(r.code, 200);
+  assert(!('guestVerified' in r.body), 'le chat annonce encore une vérification');
+  const text = r.body.content[0].text;
+  assert(!/6 99 88|4821|1 rue Exemple/.test(text), text);
+  const sys = JSON.stringify(db.anthropicBodies[0].system);
+  assert(!/Fatima|Karim|0611111111|VISITEUR RECONNU/.test(sys) && !/4821/.test(sys), 'des données de réservation sont dans le prompt du chat');
+});
+
+test('panne Beds24 : message Airbnb/Booking = simple alerte, aucune réponse du bot', async () => {
+  const pl = src('platforms'); const sec = src('security');
+  sec.rateBuckets.clear(); resetSent(); db.anthropicCalls.length = 0;
+  const msg = { id: 'm-down-1', bookingId: 9876543, source: 'guest', time: new Date(realNow() + offset).toISOString(), message: 'Bonjour, le code ne marche pas' };
+  db.fail = true;
+  await pl.handleBeds24Group('T', null, '9876543', [msg], [msg]);
+  db.fail = false;
+  assert.strictEqual(db.anthropicCalls.length, 0, 'le bot a répondu malgré la panne');
+  assert(ownerMsgs().some(m => /Beds24 injoignable/.test(m) && /9876543/.test(m) && /le code ne marche pas/.test(m)), ownerMsgs().join('|'));
+  assert(pl.processedMessages.has('m-down-1'), 'le message sera traité en retard par-dessus la réponse du propriétaire');
+});
+
+test('/sejour : trois parties (départs ce jour, en cours, à venir)', async () => {
+  const { handleOwnerCommand } = src('owner-commands');
+  src('security').rateBuckets.clear(); db.fail = false; resetSent(); offset += 61 * 1000;
+  const mk = (id, last, a, d) => ({ id, status: 'confirmed', channel: 'airbnb', firstName: 'X', lastName: last, arrival: addDays(today, a), departure: addDays(today, d), roomId: 10 });
+  db.stays = [mk(5001, 'Partant', -3, 0), mk(5002, 'Encours', -1, 2), mk(5003, 'Arrivant', 0, 2), mk(5004, 'Futur', 5, 8)];
+  await handleOwnerCommand('/sejour');
+  const m = ownerMsgs().find(t => /SÉJOURS/.test(t)) || '';
+  const iDep = m.indexOf('Départs ce jour'), iCur = m.indexOf('En cours'), iUp = m.indexOf('À venir (30 prochains jours)');
+  assert(iDep > 0 && iCur > iDep && iUp > iCur, m);
+  const part = (a, b) => m.slice(a, b);
+  assert(/Partant/.test(part(iDep, iCur)) && !/Encours|Arrivant|Futur/.test(part(iDep, iCur)), 'départs ce jour');
+  assert(/Encours/.test(part(iCur, iUp)) && /Arrivant/.test(part(iCur, iUp)) && !/Partant|Futur/.test(part(iCur, iUp)), 'en cours');
+  assert(/Futur/.test(part(iUp)) && !/Partant|Encours|Arrivant/.test(part(iUp)), 'à venir');
+  db.stays = [];
+});
+
+test('conservation : voyageur vérifié 30 jours, numéro bloqué plus longtemps, le reste 24 h', () => {
+  const st = src('state');
+  assert.strictEqual(st.convTtl({ verifiedBookingId: 1 }), 30 * 24 * 3600 * 1000);
+  assert.strictEqual(st.convTtl({ locked: true, verifiedBookingId: 1 }), st.DURABLE_TTL_MS);
+  assert.strictEqual(st.convTtl({}), st.MEMORY_TTL_MS);
+});
+
+// =============== 10. Fichiers du projet ===============
 test('package.json et fichiers du dépôt', () => {
   const fs = require('fs'); const root = path.join(__dirname, '..');
   const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
   assert.strictEqual(pkg.scripts.start, 'node server.js');
-  assert(pkg.engines.node && !pkg.dependencies['node-fetch']);
+  assert(/22/.test(pkg.engines.node) && !pkg.dependencies['node-fetch'], 'Node 22 attendu');
+  assert.strictEqual(pkg.version, '1.2.0');
   assert(!fs.existsSync(path.join(root, 'public', 'index.html')), 'index.html doit être supprimé');
   assert(/state\.json/.test(fs.readFileSync(path.join(root, '.gitignore'), 'utf8')));
   assert(/Le Golden Pub/.test(src('prompts').BASE_SYSTEM_PROMPT), 'infos locales de index.html non reprises');
