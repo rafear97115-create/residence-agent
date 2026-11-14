@@ -8,6 +8,7 @@
  *   data-api    adresse du serveur du bot (par défaut : le serveur qui sert ce fichier)
  *   data-color  couleur principale, ex. #1f3a5f
  *   data-title  titre de la fenêtre
+ *   data-privacy  adresse de la page « données personnelles » du site (lien affiché sous la fenêtre)
  */
 (function () {
   'use strict';
@@ -22,12 +23,14 @@
   base = String(base).replace(/\/+$/, '');
   var color = /^#[0-9a-f]{3,8}$/i.test((script && script.getAttribute('data-color')) || '') ? script.getAttribute('data-color') : '#1f3a5f';
   var title = (script && script.getAttribute('data-title')) || "Assistant virtuel — Résidence de l'Industrie";
+  var privacyUrl = (script && script.getAttribute('data-privacy')) || '';
+  if (!/^https:\/\//i.test(privacyUrl)) privacyUrl = '';
 
   var STORE_KEY = 'rdi-chat-v1';
   var MAX_SENT = 16;     // nombre de messages envoyés au serveur à chaque requête
   var MAX_LEN = 1000;    // longueur maximale d'un message du visiteur
 
-  var state = { messages: [], guest: { name: '', email: '', phone: '' }, verified: false, open: false, busy: false };
+  var state = { messages: [], sessionId: '', open: false, busy: false };
 
   function load() {
     try {
@@ -35,11 +38,11 @@
       if (!raw) return;
       var d = JSON.parse(raw);
       if (d && Array.isArray(d.messages)) state.messages = d.messages.slice(-40);
-      if (d && d.guest) state.guest = { name: d.guest.name || '', email: d.guest.email || '', phone: d.guest.phone || '' };
+      if (d && typeof d.sessionId === 'string' && /^[a-z0-9]{8,32}$/i.test(d.sessionId)) state.sessionId = d.sessionId;
     } catch (e) { /* stockage indisponible : le chat marche quand même */ }
   }
   function save() {
-    try { window.sessionStorage.setItem(STORE_KEY, JSON.stringify({ messages: state.messages.slice(-40), guest: state.guest })); } catch (e) { /* ignoré */ }
+    try { window.sessionStorage.setItem(STORE_KEY, JSON.stringify({ messages: state.messages.slice(-40), sessionId: state.sessionId })); } catch (e) { /* ignoré */ }
   }
 
   // ---------- Interface (Shadow DOM : le style du site n'interfère pas) ----------
@@ -51,7 +54,7 @@
     ':host{all:initial}',
     '*{box-sizing:border-box;font-family:system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif}',
     '.launcher{position:fixed;right:18px;bottom:18px;z-index:2147483000;width:58px;height:58px;border-radius:50%;border:0;background:' + color + ';color:#fff;cursor:pointer;box-shadow:0 4px 14px rgba(0,0,0,.28);display:flex;align-items:center;justify-content:center}',
-    '.launcher:focus-visible,.send:focus-visible,.close:focus-visible,.link:focus-visible{outline:3px solid #ffbf47;outline-offset:2px}',
+    '.launcher:focus-visible,.send:focus-visible,.close:focus-visible,.foot a:focus-visible{outline:3px solid #ffbf47;outline-offset:2px}',
     '.launcher svg{width:28px;height:28px;fill:#fff}',
     '.panel{position:fixed;right:18px;bottom:88px;z-index:2147483000;width:360px;max-width:calc(100vw - 24px);height:540px;max-height:calc(100vh - 110px);background:#fff;color:#1c1c1c;border-radius:14px;box-shadow:0 8px 30px rgba(0,0,0,.3);display:none;flex-direction:column;overflow:hidden}',
     '.panel.open{display:flex}',
@@ -66,18 +69,12 @@
     '.msg.bot a{color:' + color + '}',
     '.note{font-size:12px;color:#5b6270;text-align:center;padding:2px 6px}',
     '.typing{align-self:flex-start;color:#5b6270;font-size:13px;padding:2px 6px}',
-    '.id{border-top:1px solid #e1e3e8;background:#fff;padding:8px 12px;font-size:13px}',
-    '.link{background:none;border:0;color:' + color + ';text-decoration:underline;cursor:pointer;padding:2px 0;font-size:13px}',
-    '.idform{display:none;margin-top:6px;gap:6px;flex-direction:column}',
-    '.idform.open{display:flex}',
-    '.idform input{width:100%;padding:7px 9px;border:1px solid #c9ccd3;border-radius:8px;font-size:13px}',
-    '.idform small{color:#5b6270;font-size:11px;line-height:1.3}',
-    '.ok{color:#17692f;font-weight:600}',
     '.form{display:flex;gap:8px;padding:10px 12px;border-top:1px solid #e1e3e8;background:#fff}',
     '.form textarea{flex:1;resize:none;height:42px;max-height:96px;padding:9px 10px;border:1px solid #c9ccd3;border-radius:10px;font-size:14px}',
     '.send{border:0;background:' + color + ';color:#fff;border-radius:10px;padding:0 14px;font-size:14px;cursor:pointer}',
     '.send:disabled{opacity:.5;cursor:default}',
-    '.foot{font-size:11px;color:#5b6270;text-align:center;padding:0 10px 8px;background:#fff}',
+    '.foot{font-size:11px;color:#5b6270;text-align:center;padding:0 10px 8px;background:#fff;line-height:1.35}',
+    '.foot a{color:' + color + ';text-decoration:underline}',
     '@media (max-width:480px){.panel{right:0;bottom:0;width:100vw;max-width:100vw;height:100vh;max-height:100vh;border-radius:0}.launcher{right:12px;bottom:12px}}',
     '@media (prefers-reduced-motion:no-preference){.panel.open{animation:rdi-in .18s ease-out}@keyframes rdi-in{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}}'
   ].join('\n');
@@ -104,26 +101,20 @@
 
   var list = el('div', 'list', { role: 'log', 'aria-live': 'polite' });
 
-  var idBox = el('div', 'id');
-  var idToggle = el('button', 'link', { type: 'button', 'aria-expanded': 'false' });
-  idToggle.textContent = "J'ai une réservation en cours";
-  var idForm = el('div', 'idform');
-  var inName = el('input', '', { type: 'text', placeholder: 'Nom (tel que sur la réservation)', autocomplete: 'name', maxlength: '120', 'aria-label': 'Nom' });
-  var inEmail = el('input', '', { type: 'email', placeholder: 'Email de la réservation', autocomplete: 'email', maxlength: '160', 'aria-label': 'Email' });
-  var inPhone = el('input', '', { type: 'tel', placeholder: 'Téléphone (facultatif)', autocomplete: 'tel', maxlength: '40', 'aria-label': 'Téléphone' });
-  var idHelp = el('small'); idHelp.textContent = 'Deux informations suffisent. Elles servent uniquement à retrouver votre séjour et ne sont pas conservées au-delà de cette session.';
-  var idStatus = el('div', 'ok'); idStatus.setAttribute('aria-live', 'polite');
-  idForm.appendChild(inName); idForm.appendChild(inEmail); idForm.appendChild(inPhone); idForm.appendChild(idHelp);
-  idBox.appendChild(idToggle); idBox.appendChild(idStatus); idBox.appendChild(idForm);
-
   var form = el('div', 'form');
   var input = el('textarea', '', { placeholder: 'Écrivez votre message…', maxlength: String(MAX_LEN), 'aria-label': 'Votre message', rows: '1' });
   var sendBtn = el('button', 'send', { type: 'button' }); sendBtn.textContent = 'Envoyer';
   form.appendChild(input); form.appendChild(sendBtn);
 
-  var foot = el('div', 'foot'); foot.textContent = "Assistant automatisé : n'y indiquez aucune donnée bancaire.";
+  var foot = el('div', 'foot');
+  foot.appendChild(document.createTextNode("Assistant automatisé (IA) : vos messages sont transmis à un prestataire d'intelligence artificielle pour y répondre. N'y indiquez aucune donnée bancaire ni information sensible."));
+  if (privacyUrl) {
+    foot.appendChild(document.createTextNode(' '));
+    var pa = document.createElement('a'); pa.href = privacyUrl; pa.target = '_blank'; pa.rel = 'noopener noreferrer'; pa.textContent = 'Données personnelles';
+    foot.appendChild(pa);
+  }
 
-  panel.appendChild(head); panel.appendChild(list); panel.appendChild(idBox); panel.appendChild(form); panel.appendChild(foot);
+  panel.appendChild(head); panel.appendChild(list); panel.appendChild(form); panel.appendChild(foot);
   root.appendChild(launcher); root.appendChild(panel);
 
   // ---------- Affichage des messages ----------
@@ -162,33 +153,20 @@
     list.textContent = '';
     addBubble('bot', "Bonjour ! Posez-moi votre question sur la Résidence ou sur votre séjour.");
     state.messages.forEach(function (m) { addBubble(m.role, m.content); });
-    updateIdStatus();
-  }
-
-  function updateIdStatus() {
-    idStatus.textContent = state.verified ? '✓ Réservation reconnue' : '';
   }
 
   // ---------- Envoi ----------
-  function readGuest() {
-    state.guest = { name: inName.value.trim(), email: inEmail.value.trim(), phone: inPhone.value.trim() };
-  }
-
   function send() {
     if (state.busy) return;
     var text = input.value.trim();
     if (!text) return;
-    readGuest();
     state.messages.push({ role: 'user', content: text.slice(0, MAX_LEN) });
     addBubble('user', text);
     input.value = '';
     save();
     state.busy = true; sendBtn.disabled = true; showTyping(true);
 
-    var payload = { messages: state.messages.slice(-MAX_SENT) };
-    if (state.guest.name) payload.guestName = state.guest.name;
-    if (state.guest.email) payload.guestEmail = state.guest.email;
-    if (state.guest.phone) payload.guestPhone = state.guest.phone;
+    var payload = { messages: state.messages.slice(-MAX_SENT), sessionId: state.sessionId };
 
     fetch(base + '/api/chat', {
       method: 'POST',
@@ -210,10 +188,8 @@
       var c = res.data && res.data.content;
       if (Array.isArray(c)) reply = c.map(function (x) { return x && x.text ? x.text : ''; }).join('\n').trim();
       if (!reply) reply = "Désolé, je n'ai pas pu répondre. Pouvez-vous reformuler ?";
-      state.verified = !!(res.data && res.data.guestVerified);
       state.messages.push({ role: 'assistant', content: reply });
       addBubble('bot', reply);
-      updateIdStatus();
       save();
     }).catch(function () {
       showTyping(false);
@@ -240,16 +216,14 @@
   input.addEventListener('keydown', function (e) {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
   });
-  idToggle.addEventListener('click', function () {
-    var open = !idForm.classList.contains('open');
-    idForm.classList.toggle('open', open);
-    idToggle.setAttribute('aria-expanded', open ? 'true' : 'false');
-    if (open) inName.focus();
-  });
-
   function mount() {
     load();
-    inName.value = state.guest.name; inEmail.value = state.guest.email; inPhone.value = state.guest.phone;
+    if (!state.sessionId) {
+      var chars = 'abcdefghijklmnopqrstuvwxyz0123456789', id = '';
+      try { var arr = new Uint8Array(16); window.crypto.getRandomValues(arr); for (var i = 0; i < arr.length; i++) id += chars[arr[i] % chars.length]; }
+      catch (e) { for (var k = 0; k < 16; k++) id += chars[Math.floor(Math.random() * chars.length)]; }
+      state.sessionId = id; save();
+    }
     renderAll();
     document.body.appendChild(host);
   }
