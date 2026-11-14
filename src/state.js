@@ -12,10 +12,14 @@ const MEMORY_MAX_MESSAGES = 10; // 5 échanges (question + réponse)
 const MEMORY_TTL_MS = 24 * 60 * 60 * 1000; // 24 h, comme la fenêtre WhatsApp (messages seulement)
 const LOCK_DAYS = Math.max(Number(process.env.LOCK_DAYS) || 90, 1);
 const LOCK_MS = LOCK_DAYS * 24 * 3600 * 1000;
-// Un voyageur vérifié, un numéro bloqué ou un compteur d'échecs en cours sont gardés bien plus longtemps que les messages
+// Durées de conservation d'un numéro WhatsApp (minimisation des données) :
+// - numéro bloqué ou compteur d'échecs en cours : LOCK_DAYS + 10 jours (le blocage doit durer, sinon il ne sert à rien) ;
+// - voyageur vérifié : 30 jours après son dernier message (la réservation est de toute façon revérifiée à chaque message) ;
+// - le reste : 24 h, comme la fenêtre WhatsApp.
 const DURABLE_TTL_MS = (LOCK_DAYS + 10) * 24 * 3600 * 1000;
-function isDurableConv(c) { return !!(c && (c.verifiedBookingId || c.locked || c.failedAttempts)); }
-function convTtl(c) { return isDurableConv(c) ? DURABLE_TTL_MS : MEMORY_TTL_MS; }
+const VERIFIED_TTL_MS = 30 * 24 * 3600 * 1000;
+function isDurableConv(c) { return !!(c && (c.locked || c.failedAttempts)); }
+function convTtl(c) { return isDurableConv(c) ? DURABLE_TTL_MS : (c && c.verifiedBookingId ? VERIFIED_TTL_MS : MEMORY_TTL_MS); }
 const conversations = new Map(); // numéro -> { messages, updated, verifiedBookingId, linksSent, lastWasCourtesy, identityText, locked, notifyFailAt, failedAttempts }
 
 function ensureConv(phone) {
@@ -143,8 +147,7 @@ function restoreState(data, now = Date.now()) {
   for (const [id, t] of Object.entries(data.seenWaIds || {})) if (now - Number(t) < 6 * 3600 * 1000) seenWaIds.set(id, Number(t));
   for (const [phone, c] of Object.entries(data.conversations || {})) {
     if (!c) continue;
-    const durable = !!(c.verifiedBookingId || c.locked || Number(c.failedAttempts));
-    if (now - Number(c.updated) > (durable ? DURABLE_TTL_MS : MEMORY_TTL_MS)) continue;
+    if (now - Number(c.updated) > convTtl({ verifiedBookingId: c.verifiedBookingId, locked: c.locked, failedAttempts: Number(c.failedAttempts) })) continue;
     conversations.set(phone, {
       messages: [], updated: Number(c.updated), verifiedBookingId: c.verifiedBookingId || null, verifiedReasons: c.verifiedReasons || [],
       linksSent: !!c.linksSent, lastWasCourtesy: false, identityText: '', locked: !!c.locked, lockedAt: Number(c.lockedAt) || (c.locked ? Number(c.updated) : 0), notifyFailAt: 0,
@@ -205,6 +208,7 @@ module.exports = {
   LOCK_DAYS,
   LOCK_MS,
   DURABLE_TTL_MS,
+  VERIFIED_TTL_MS,
   isDurableConv,
   convTtl,
   conversations,

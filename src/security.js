@@ -4,8 +4,8 @@
  */
 
 const crypto = require('crypto');
-const { ADMIN_KEY_QUERY, ALLOW_UNSIGNED_WEBHOOKS } = require('./config');
-const { safeEqual } = require('./utils');
+const { ADDRESS_FULL, ADMIN_KEY_QUERY, ALLOW_UNSIGNED_WEBHOOKS, EMERGENCY_PHONE } = require('./config');
+const { phoneKey, safeEqual } = require('./utils');
 
 // ==================== SÉCURITÉ ====================
 
@@ -63,10 +63,32 @@ const ADDRESS_RE = new RegExp(
   'gi'
 );
 
+// Filtre construit à partir de la variable ADDRESS_FULL (rue et numéro, avant la première virgule) : la vraie adresse est retirée même si
+// elle change, sans qu'il soit nécessaire de la connaître dans le code. Espaces, virgules, points, apostrophes et tirets sont tolérés entre les mots.
+function addressRegexFrom(full) {
+  const toks = String(full || '').split(',')[0].split(/[\s'\u2019\u2018`\u00B4\-.]+/).filter(Boolean);
+  if (toks.length < 2) return null;
+  return new RegExp('(?<![\\p{L}\\p{N}])' + toks.map(t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join("[\\s'\u2019\u2018`\u00B4\\-.,]*") + '(?![\\p{L}\\p{N}])', 'giu');
+}
+const ADDRESS_FULL_RE = addressRegexFrom(ADDRESS_FULL);
+
 function applyAddressPolicy(reply, allowAddress) {
   if (allowAddress) return reply;
   const cleaned = String(reply || '').replace(/[\u200B-\u200D\u2060\uFEFF\u00AD]/g, ''); // caractères invisibles glissés dans l'adresse
-  return cleaned.replace(ADDRESS_RE, m => (/^au\s/i.test(m) ? '\u00E0 ' : '') + 'Saint-Quentin (02100)');
+  const out = cleaned.replace(ADDRESS_RE, m => (/^au\s/i.test(m) ? '\u00E0 ' : '') + 'Saint-Quentin (02100)');
+  return ADDRESS_FULL_RE ? out.replace(ADDRESS_FULL_RE, 'Saint-Quentin (02100)') : out;
+}
+
+// ==================== NUMÉRO D'URGENCE : filet de sécurité ====================
+// Le numéro n'est donné qu'aux voyageurs vérifiés. Même si le modèle se trompe (ou est manipulé), il est retiré des autres réponses,
+// quelle que soit sa présentation (espaces, points, tirets, +33, 0033, (0)...).
+const PHONE_IN_TEXT_RE = /(?:\+|00)?\d[\d\s.()\-\u00A0\u202F]{7,}\d/g;
+function applyPhonePolicy(reply, allowPhone, phone = EMERGENCY_PHONE) {
+  if (allowPhone || !phone) return reply;
+  const key = phoneKey(phone);
+  if (!key) return reply;
+  const cleaned = String(reply || '').replace(/[\u200B-\u200D\u2060\uFEFF\u00AD]/g, '');
+  return cleaned.replace(PHONE_IN_TEXT_RE, m => (m.replace(/\D/g, '').includes(key) ? '[numéro réservé aux voyageurs vérifiés]' : m));
 }
 
 // Compteurs de limite sans incrément automatique (échecs de vérification)
@@ -93,7 +115,9 @@ module.exports = {
   rateLimit,
   ADDR_APOS,
   ADDRESS_RE,
+  addressRegexFrom,
   applyAddressPolicy,
+  applyPhonePolicy,
   limitReached,
   countHits,
   recordHit

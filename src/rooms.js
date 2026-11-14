@@ -59,12 +59,13 @@ function buildRoomNumbers(propInfo) {
   return map;
 }
 
+// Les 5 logements (numéro, nom, mots reconnus dans Beds24 ou dans les messages). Airbnb n'ayant plus qu'un lien pour l'immeuble, il n'y a plus de lien par logement (voir AIRBNB_URL).
 const AIRBNB_LINKS = [
-  { num: 1, nom: 'Agate', mots: ['agate'], lien: 'https://airbnb.com/h/rdi-agate1' },
-  { num: 2, nom: 'Bégonia', mots: ['begonia'], lien: 'https://airbnb.com/h/rdi-begonia2' },
-  { num: 3, nom: 'Capucine', mots: ['capucine'], lien: 'https://airbnb.com/h/rdi-capucine3' },
-  { num: 4, nom: 'Dahlia', mots: ['dahlia'], lien: 'https://airbnb.com/h/rdi-daliha4' },
-  { num: 5, nom: 'Églantine', mots: ['eglantine'], lien: 'https://airbnb.com/h/rdi-eglantine5' }
+  { num: 1, nom: 'Agate', mots: ['agate'] },
+  { num: 2, nom: 'Bégonia', mots: ['begonia'] },
+  { num: 3, nom: 'Capucine', mots: ['capucine'] },
+  { num: 4, nom: 'Dahlia', mots: ['dahlia'] },
+  { num: 5, nom: 'Églantine', mots: ['eglantine'] }
 ];
 
 // "3 Capucine" (numéro + nom), sinon le nom Beds24

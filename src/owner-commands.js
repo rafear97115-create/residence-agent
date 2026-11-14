@@ -46,7 +46,7 @@ function ownerHelpText() {
     "",
     "📊 *SUIVI*",
     "*/sejour [jours]*",
-    "→ Les séjours en cours et à venir (30 jours par défaut, 365 au maximum) : logement, voyageur, plateforme, dates, numéro de réservation.",
+    "→ Trois listes : départs ce jour, séjours en cours, arrivées à venir (30 jours par défaut, 365 au maximum). Pour chacun : logement, voyageur, plateforme, dates, numéro de réservation.",
     "Ex : /sejour 60",
     "*/statut*",
     "→ État du bot : conversations en pause, numéros bloqués, voyageurs reconnus, réglages actifs.",
@@ -147,8 +147,11 @@ async function ownerStaysText(days = SEJOUR_DEFAULT_DAYS) {
   if (!stays) return '❌ Impossible de lire les réservations dans Beds24 pour le moment. Réessayez dans quelques minutes.';
   const today = parisToday();
   const propInfo = await getPropertyInfo();
-  const current = stays.filter(b => String(b.arrival).slice(0, 10) <= today);
-  const upcoming = stays.filter(b => String(b.arrival).slice(0, 10) > today);
+  const arr = b => String(b.arrival).slice(0, 10);
+  const dep = b => String(b.departure).slice(0, 10);
+  const departing = stays.filter(b => dep(b) === today);                    // part aujourd'hui
+  const current = stays.filter(b => arr(b) <= today && dep(b) > today);     // en cours (y compris arrivée aujourd'hui)
+  const upcoming = stays.filter(b => arr(b) > today);                       // arrivées à venir
 
   const out = ['🏠 *SÉJOURS*', ''];
   let size = out.join('\n').length;
@@ -165,8 +168,9 @@ async function ownerStaysText(days = SEJOUR_DEFAULT_DAYS) {
     if (shown < list.length) out.push(`… et ${list.length - shown} autre(s) : réduisez la période (ex. /sejour 14)`);
     out.push('');
   };
-  section('En cours', current, 'Aucun séjour en cours.');
-  section(`À venir (${days} prochains jours)`, upcoming, 'Aucune arrivée prévue sur cette période.');
+  section('🧳 Départs ce jour', departing, "Aucun départ aujourd'hui.");
+  section('🏠 En cours', current, 'Aucun séjour en cours.');
+  section(`📅 À venir (${days} prochains jours)`, upcoming, 'Aucune arrivée prévue sur cette période.');
   out.push('_/sejour 60 pour regarder plus loin (365 jours maximum). Écrire à un voyageur : /repondre bNUMÉRO votre message._');
   return out.join('\n');
 }

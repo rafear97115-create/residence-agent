@@ -3,8 +3,8 @@
  * (extrait de l'ancien server.js ; voir server.js pour l'architecture)
  */
 
-const { ADDRESS_FULL, ADDRESS_HINT, BOOKING_URL, LOCK_INSTRUCTIONS, LONG_STAY_POLICY, SITE_URL, WHATSAPP_PUBLIC_NUMBER } = require('./config');
-const { AIRBNB_LINKS, beds24UnitSheet, describeRoom } = require('./rooms');
+const { ADDRESS_FULL, ADDRESS_HINT, AIRBNB_URL, BOOKING_URL, EMERGENCY_PHONE, LOCK_INSTRUCTIONS, LONG_STAY_POLICY, PRIVACY_URL, SITE_URL, WHATSAPP_PUBLIC_NUMBER } = require('./config');
+const { beds24UnitSheet, describeRoom } = require('./rooms');
 const { calendarHint, fill, getDatetime, parisToday } = require('./utils');
 
 // ==================== PROMPTS ====================
@@ -104,18 +104,13 @@ Les échanges se font de préférence sur la plateforme de réservation (Airbnb 
 Tu réponds directement dans la messagerie de la plateforme de réservation, en tant qu'assistant virtuel de la Résidence (jamais en te faisant passer pour le propriétaire).
 Tu adaptes tes réponses selon la plateforme détectée dans le contexte.
 
-LIENS AIRBNB PAR LOGEMENT :
-- Logement 1 (Agate) : https://airbnb.com/h/rdi-agate1
-- Logement 2 (Bégonia) : https://airbnb.com/h/rdi-begonia2
-- Logement 3 (Capucine) : https://airbnb.com/h/rdi-capucine3
-- Logement 4 (Dahlia) : https://airbnb.com/h/rdi-daliha4
-- Logement 5 (Églantine) : https://airbnb.com/h/rdi-eglantine5
+LIEN AIRBNB (un seul lien pour tous les logements : il mène à l'annonce de l'immeuble) : ${AIRBNB_URL}
 
 LIEN BOOKING (tous logements) : https://www.booking.com/Share-4ZhcuX6
 Pour les disponibilités Booking : cliquer sur "Voir les disponibilités" après avoir saisi les dates.
 
 Si le voyageur demande les disponibilités :
-- Sur Airbnb → donner les liens des logements disponibles ci-dessus
+- Sur Airbnb → donner le lien Airbnb ci-dessus, en précisant quels logements sont libres si la disponibilité a été vérifiée
 - Sur Booking → donner le lien https://www.booking.com/Share-4ZhcuX6
 - Sinon → donner les deux options`;
 
@@ -200,6 +195,16 @@ La signature est la dernière ligne visible du message, juste avant la balise [[
   return r;
 }
 
+// Premier message du bot : rappel que les échanges sont traités par un assistant automatisé (IA), avec le lien vers la page « données personnelles »
+// (variable PRIVACY_URL). Placé avant la signature, qui reste la dernière ligne visible.
+function ensurePrivacyNote(reply, introduced) {
+  if (introduced || !PRIVACY_URL || String(reply).includes(PRIVACY_URL)) return reply;
+  const note = `Vos messages sont traités par un assistant automatisé (IA). Vos données personnelles : ${PRIVACY_URL}`;
+  const i = String(reply).lastIndexOf(SIGNATURE);
+  if (i > 0) return `${reply.slice(0, i).trimEnd()}\n\n${note}\n\n${reply.slice(i)}`;
+  return `${reply}\n\n${note}`;
+}
+
 // Le bot s'est-il déjà présenté dans ce fil ?
 function hasIntro(history) {
   return (history || []).some(m => m.role === 'assistant' && /assistant virtuel/i.test(String(m.content || '')));
@@ -239,11 +244,13 @@ Un voyageur qui n'a pas encore de réservation peut simplement réserver (voir S
 const RULES_WHATSAPP_LOCKED = `
 La vérification automatique de ce numéro est BLOQUÉE (trop de tentatives). Ne demande plus AUCUNE information d'identité (ni nom, ni email, ni dates). Dis une seule fois que le Service Relation Client est prévenu et reviendra personnellement vers le voyageur sur ce numéro, puis réponds brièvement sans rien communiquer de confidentiel.`;
 
-const EMERGENCY_WITH_BOOKING = `En cas de panne, incident technique, dégât des eaux, impossibilité d'accéder au logement ou plainte grave signalés par le voyageur, donner ce numéro : 06 62 52 43 81. S'excuser et assurer une intervention rapide. Ne donner ce numéro QUE si un incident réel est signalé.`;
+const EMERGENCY_WITH_BOOKING = EMERGENCY_PHONE
+  ? `En cas de panne, incident technique, dégât des eaux, impossibilité d'accéder au logement ou plainte grave signalés par le voyageur, donner ce numéro : ${EMERGENCY_PHONE}. S'excuser et assurer une intervention rapide. Ne donner ce numéro QUE si un incident réel est signalé.`
+  : `En cas de panne, incident technique, dégât des eaux, impossibilité d'accéder au logement ou plainte grave signalés par le voyageur : t'excuser, dire que le Service Relation Client est prévenu et le contactera. Tu ne disposes d'aucun numéro d'urgence à donner : n'en invente pas.`;
 
-const EMERGENCY_WITHOUT_BOOKING = `NE PAS donner le numéro d'urgence 06 62 52 43 81. NE PAS donner l'adresse email. En cas de problème urgent, invite le visiteur à écrire au Service Relation Client via la plateforme où il a réservé (c'est l'une des exceptions prévues à la règle fondamentale) ; danger vital : 112.`;
+const EMERGENCY_WITHOUT_BOOKING = `Tu ne connais aucun numéro d'urgence à donner : n'en cite aucun. NE PAS donner l'adresse email. En cas de problème urgent, invite le visiteur à écrire au Service Relation Client via la plateforme où il a réservé (c'est l'une des exceptions prévues à la règle fondamentale) ; danger vital : 112.`;
 
-const EMERGENCY_WITHOUT_BOOKING_WHATSAPP = `NE PAS donner le numéro d'urgence 06 62 52 43 81. NE PAS donner l'adresse email. En cas de problème urgent, dis que le Service Relation Client est prévenu et reviendra vers le voyageur ; danger vital : 112.`;
+const EMERGENCY_WITHOUT_BOOKING_WHATSAPP = `Tu ne connais aucun numéro d'urgence à donner : n'en cite aucun. NE PAS donner l'adresse email. En cas de problème urgent, dis que le Service Relation Client est prévenu et reviendra vers le voyageur ; danger vital : 112.`;
 
 // Ancien voyageur : il peut se voir proposer un tarif préférentiel, MAIS seulement après validation de la Direction
 // (la demande passe d'abord par le Service Relation Client). Le bot ne cite jamais de tarif et n'en propose pas de lui-même.
@@ -256,7 +263,7 @@ const SITE_RULE_WHATSAPP = `Le voyageur te contacte par WhatsApp : il n'est pas 
 const WA_CONTACT_TEXT = WHATSAPP_PUBLIC_NUMBER ? ` au ${WHATSAPP_PUBLIC_NUMBER}` : ' (numéro indiqué sur le site)';
 
 const WEB_CHAT_RULE = `=== CHAT DU SITE INTERNET ===
-Le visiteur t'écrit depuis le chat du site internet de la Résidence : il n'est ni sur Airbnb ni sur Booking, et tu ne connais ni son nom ni son numéro tant qu'il n'est pas reconnu. Pour réserver, oriente-le vers Airbnb ou Booking (présentation des moyens de réservation, sans la ligne du site : il est déjà dessus). Pour la suite des échanges, une modification ou une prolongation de réservation, invite-le à passer par sa plateforme de réservation. Le Service Relation Client ne peut pas te répondre à travers ce chat : si tu lui transmets une demande, invite le visiteur à lui écrire sur WhatsApp${WA_CONTACT_TEXT} pour être recontacté.`;
+Le visiteur t'écrit depuis le chat du site internet de la Résidence : il n'est ni sur Airbnb ni sur Booking, et tu ne connais ni son nom ni son numéro (le chat ne vérifie l'identité de personne). Pour réserver, oriente-le vers Airbnb ou Booking (présentation des moyens de réservation, sans la ligne du site : il est déjà dessus). Pour la suite des échanges, une modification ou une prolongation de réservation, invite-le à passer par sa plateforme de réservation. Le Service Relation Client ne peut pas te répondre à travers ce chat : si tu lui transmets une demande, invite le visiteur à lui écrire sur WhatsApp${WA_CONTACT_TEXT} pour être recontacté.`;
 
 // Chat du site : jamais de codes, même pour un visiteur reconnu (nom + téléphone ne sont pas des secrets). Les codes sont réservés à WhatsApp,
 // où le numéro de l'expéditeur est authentique.
@@ -270,20 +277,17 @@ const EMERGENCY_WEB = `NE PAS donner de numéro d'urgence ni d'adresse email. En
 
 // Présentation unique des moyens de réservation (site, Airbnb par logement, Booking)
 function bookingFormatRules() {
-  const airbnbLines = AIRBNB_LINKS.map(l => ` Logement ${l.num} - ${l.nom} : ${l.lien}`).join('\n');
   return `=== PRÉSENTATION DES MOYENS DE RÉSERVATION ===
 Chaque fois que tu cites des moyens de réserver, utilise EXACTEMENT cette présentation. Écris chaque adresse en entier, sur sa ligne : la messagerie la rend cliquable.
 
 Pour réserver :
 - En direct sur notre site web : ${SITE_URL}
-- Via Airbnb :
-${airbnbLines}
+- Via Airbnb : ${AIRBNB_URL}
 - Via Booking : ${BOOKING_URL}
 
 Adapte la liste à la situation, sans changer la présentation :
 - Garde uniquement les lignes autorisées par les règles de la plateforme et de la section SITE INTERNET (sur Airbnb : Airbnb seulement ; sur Booking : Booking seulement ; sur WhatsApp et sur le chat du site : Airbnb et Booking, sans la ligne du site).
-- Pour Airbnb, si la disponibilité a été vérifiée, ne garde que les logements libres.
-- Si un seul logement est concerné, une seule ligne Airbnb suffit.`;
+- Le lien Airbnb est UNIQUE (il mène à l'annonce de l'immeuble, pas à un logement précis) : si la disponibilité a été vérifiée, dis en une phrase quels logements sont libres (nom et numéro), sans écrire de lien par logement.`;
 }
 
 function availabilityRules() {
@@ -364,7 +368,7 @@ function buildSystemPrompt({ propInfo = null, roomInfo = null, booking = null, i
   prompt = fill(prompt, '{IDENTITY_RULE}', identityRules(introduced));
 
   // L'adresse exacte n'est jamais donnée (quel que soit le canal) : seulement "à 1 km de la gare routière"
-  prompt = fill(prompt, '{ADDRESS_RULE}', wa ? (hasBooking ? ADDRESS_RULE_WHATSAPP_VERIFIED : ADDRESS_RULE_WHATSAPP) : ADDRESS_RULE_PLATFORM);
+  prompt = fill(prompt, '{ADDRESS_RULE}', wa ? (hasBooking && ADDRESS_FULL ? ADDRESS_RULE_WHATSAPP_VERIFIED : ADDRESS_RULE_WHATSAPP) : ADDRESS_RULE_PLATFORM);
 
   if (web) {
     prompt = fill(prompt, '{SECURITY_RULES}', RULES_WEB_NO_CODES);
@@ -395,13 +399,6 @@ function buildSystemPrompt({ propInfo = null, roomInfo = null, booking = null, i
 - Nom : ${booking.firstName || ''} ${booking.lastName || ''}
 - Séjour : du ${booking.arrival} au ${booking.departure}
 - Logement : ${roomInfo?.name || booking.roomId}`;
-  }
-
-  if (hasBooking && web) {
-    prompt += `\n\n=== VISITEUR RECONNU (chat du site) ===
-- Séjour : du ${booking.arrival} au ${booking.departure}
-- Logement : ${roomInfo?.name || booking.roomId}
-(Aucun code d'accès ici : voir RÈGLES STRICTES DE SÉCURITÉ.)`;
   }
 
   if (roomInfo && hasBooking && !web) {
@@ -441,6 +438,7 @@ module.exports = {
   identityRules,
   hasIntro,
   ensureSignature,
+  ensurePrivacyNote,
   RULES_WITH_BOOKING,
   RULES_WITHOUT_BOOKING,
   RULES_WITHOUT_BOOKING_WHATSAPP,

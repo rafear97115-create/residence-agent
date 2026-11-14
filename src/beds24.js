@@ -266,7 +266,7 @@ async function checkAvailability(arrival, departure, excludeBookingId = null) {
   for (const room of propInfo.rooms) {
     const name = room.name || `Logement ${room.id}`;
     const link = AIRBNB_LINKS.find(l => l.num === roomNumbers.get(String(room.id)));
-    const label = link ? `Logement ${link.num} - ${link.nom} (Airbnb : ${link.lien})` : name;
+    const label = link ? `Logement ${link.num} - ${link.nom}` : name;
     if (busy.has(String(room.id))) occupied.push(label);
     else { free.push(label); freeIds.push(String(room.id)); }
   }

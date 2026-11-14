@@ -10,8 +10,8 @@ const { FORMER_GUEST_MIN_BOOKINGS, OWNER_TEST_MODE } = require('./config');
 const { identifyWhatsAppGuest, verificationSuspended } = require('./identity');
 const { getOwnerNumber, sendOwnerAlert, sendWhatsAppReply } = require('./messaging');
 const { handleOwnerCommand } = require('./owner-commands');
-const { buildSystemPrompt, ensureSignature, hasIntro } = require('./prompts');
-const { applyAddressPolicy, rateLimit } = require('./security');
+const { buildSystemPrompt, ensurePrivacyNote, ensureSignature, hasIntro } = require('./prompts');
+const { applyAddressPolicy, applyPhonePolicy, rateLimit } = require('./security');
 const { addToHistory, ensureConv, getHistory, isLocked, isPaused, markDirty } = require('./state');
 const { bookingPhoneKeys, logText, normalizeWaNumber, phoneKey } = require('./utils');
 
@@ -124,7 +124,8 @@ async function handleWhatsAppMessage(message) {
   console.log('➡️ Appel Claude...');
   const raw = await generateAIReply(text, systemPrompt, history);
   const parsed = raw ? parseAlert(raw, text) : null;
-  if (parsed) parsed.reply = ensureSignature(applyAddressPolicy(parsed.reply, verified), introduced);
+  // Adresse exacte et numéro d'urgence : seulement pour un voyageur vérifié (filets de sécurité si le modèle se trompe)
+  if (parsed) parsed.reply = ensureSignature(ensurePrivacyNote(applyPhonePolicy(applyAddressPolicy(parsed.reply, verified), verified), introduced), introduced);
   console.log('⬅️ Réponse Claude:', parsed ? logText(parsed.reply, 60) : 'AUCUNE', '| alerte:', parsed ? parsed.category : '-');
 
   if (!parsed || !parsed.reply) {

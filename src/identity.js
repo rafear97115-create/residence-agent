@@ -4,8 +4,8 @@
  */
 
 const { getActiveBookingsSafe, getAllActiveBookings, getBookingByIdSafe, getPropertyInfo, isActiveStay } = require('./beds24');
-const { MAX_BAD_EMAILS, MAX_DAY_NUMBERS, MAX_FAILED_ATTEMPTS, MAX_UNITS_MENTIONED, STAY_VERIFICATION, VERIFY_FAIL_GLOBAL_LIMIT, applyEmailRequirement } = require('./config');
-const { sendOwnerAlert } = require('./messaging');
+const { MAX_BAD_EMAILS, MAX_DAY_NUMBERS, MAX_FAILED_ATTEMPTS, MAX_SOFT_ATTEMPTS, MAX_UNITS_MENTIONED, STAY_VERIFICATION, VERIFY_FAIL_GLOBAL_LIMIT, applyEmailRequirement } = require('./config');
+const { alertBeds24Down, sendOwnerAlert } = require('./messaging');
 const { AIRBNB_LINKS, buildRoomNumbers } = require('./rooms');
 const { countHits, limitReached, rateLimit, recordHit } = require('./security');
 const { ensureConv, isLocked, lockConv, markDirty } = require('./state');
@@ -36,56 +36,15 @@ function noteVerificationFailure(origin = '') {
 }
 
 // ---------- Vérification d'identité ----------
-// Règle : 2 critères sur 4 (nom, téléphone, email, séjour), comparaison EXACTE (plus de sous-chaînes).
-// Le critère "séjour" (WhatsApp seulement) = dates exactes d'arrivée et de départ + numéro du logement.
+// Règle : 2 critères sur 4 (nom, téléphone, email, séjour), comparaison EXACTE (plus de sous-chaînes). WhatsApp seulement :
+// le chat du site ne vérifie plus personne (il ne donne aucun code).
+// Le critère "séjour" = dates exactes d'arrivée et de départ + numéro du logement.
 // NB : pour une réservation Airbnb/Booking, l'email stocké dans Beds24 est une adresse relais que le voyageur
 // ne connaît pas, et le téléphone est souvent absent : sans critère "séjour", ces voyageurs ne peuvent pas être vérifiés.
 
 function lastNameTokens(b) {
   const ln = significantTokens(tokens(b.lastName));
   return ln.length ? ln : significantTokens(tokens(b.firstName));
-}
-
-// Chat web : l'utilisateur fournit nom / téléphone / email
-function webIdentityScore(b, provided) {
-  let score = 0;
-  const reasons = [];
-
-  if (provided.name) {
-    const p = tokens(provided.name);
-    const bookingTokens = new Set([...tokens(b.firstName), ...tokens(b.lastName)]);
-    const lt = lastNameTokens(b);
-    if (p.length && p.every(t => bookingTokens.has(t)) && lt.some(t => p.includes(t))) {
-      score++; reasons.push('nom');
-    }
-  }
-  if (provided.phone) {
-    const pk = phoneKey(provided.phone);
-    if (pk && bookingPhoneKeys(b).includes(pk)) { score++; reasons.push('téléphone'); }
-  }
-  if (provided.email && b.email) {
-    if (String(provided.email).toLowerCase().trim() === String(b.email).toLowerCase().trim()) {
-      score++; reasons.push('email');
-    }
-  }
-  return applyEmailRequirement(b, { score, reasons });
-}
-
-async function verifyGuestIdentity(provided) {
-  const criteria = [provided.name, provided.phone, provided.email].filter(Boolean).length;
-  if (criteria < 2) return null; // au moins 2 informations fournies
-  const bookings = await getAllActiveBookings();
-  let best = null;
-  for (const b of bookings) {
-    const { score, reasons } = webIdentityScore(b, provided);
-    if (score >= 2 && (!best || score > best.score)) best = { b, score, reasons };
-  }
-  if (best) {
-    console.log(`✅ Voyageur vérifié (web) | critères: ${best.reasons.join(', ')} | logement: ${best.b.roomId}`);
-    return best.b;
-  }
-  console.log('❌ Vérification web échouée');
-  return null;
 }
 
 // WhatsApp : le numéro expéditeur est authentique (Meta), le reste vient de la conversation
@@ -145,7 +104,7 @@ function waIdentityScore(b, ctx) {
   // écrit dans le message n'est pas une preuve (le nom et le téléphone d'un voyageur ne sont pas des secrets).
   if (ctx.fromKey && bookingPhoneKeys(b).includes(ctx.fromKey)) { score++; reasons.push('téléphone'); }
   if (b.email && (ctx.emails || []).includes(String(b.email).toLowerCase().trim())) { score++; reasons.push('email'); }
-  if (waNameMatches(b, ctx.words)) { score++; reasons.push('nom'); }
+  if (!ctx.nameSprayed && waNameMatches(b, ctx.words)) { score++; reasons.push('nom'); }
   if (STAY_VERIFICATION && !ctx.sprayed && ctx.text && ctx.units && stayDatesMatch(b, ctx.text)) {
     // Si on connaît le numéro de ce logement, le voyageur doit citer le bon.
     // Sinon (nom Beds24 du type "Charmant studio...", sans "Agate"), il doit au moins avoir cité un logement.
@@ -194,6 +153,15 @@ function buildWaCtx(fromKey, joined, roomNumbers) {
   };
 }
 
+// Anti-devinette par liste de noms : un voyageur légitime écrit SON nom. Si le texte contient les noms de famille de plusieurs voyageurs
+// différents (réservations actives), c'est une liste jetée pour voir lequel correspond : le critère « nom » est alors ignoré.
+// (Deux réservations au même nom de famille ne comptent que pour une personne.)
+function detectNameSpray(bookings, ctx) {
+  const people = new Set();
+  for (const b of bookings) if (waNameMatches(b, ctx.words)) people.add(lastNameTokens(b).join(' '));
+  return people.size > 1;
+}
+
 // Plusieurs voyageurs différents au même meilleur score = le texte les décrit tous (devinette) : on ne valide personne.
 function pickBestBooking(scored) {
   if (!scored.length) return { best: null, ambiguous: false };
@@ -205,9 +173,23 @@ function pickBestBooking(scored) {
 }
 
 // Compte les tentatives d'identification ratées d'un numéro : au-delà de MAX_FAILED_ATTEMPTS, le propriétaire reprend la main
-function registerFailedAttempt(conv, text, from, force = false) {
+// - échec « fort » (par défaut) : tentative qui ressemble à une devinette (voir identifyWhatsAppGuest) : compte pour le blocage du numéro
+//   (MAX_FAILED_ATTEMPTS) et pour le plafond global ;
+// - échec « faible » (soft) : message qui parle de dates ou de logement mais ne correspond à AUCUNE réservation (typiquement un prospect qui
+//   demande une disponibilité) : blocage seulement au-delà de MAX_SOFT_ATTEMPTS sur 24 h, et ne compte pas pour le plafond global.
+function registerFailedAttempt(conv, text, from, force = false, soft = false) {
   if (!force && !looksLikeIdentityAttempt(text)) return;
   const now = Date.now();
+  if (soft) {
+    if (now - (conv.softAt || 0) > 24 * 3600 * 1000) conv.softAttempts = 0;
+    conv.softAttempts = (conv.softAttempts || 0) + 1;
+    conv.softAt = now;
+    if (conv.softAttempts >= MAX_SOFT_ATTEMPTS && !isLocked(conv)) {
+      lockConv(conv);
+      console.warn('🔒 Vérification WhatsApp bloquée (messages d\'identification répétés sans correspondance) pour ...' + String(from).slice(-3));
+    }
+    return;
+  }
   if (now - (conv.failedAt || 0) > 24 * 3600 * 1000) conv.failedAttempts = 0; // le compteur retombe après 24 h sans échec (le blocage, lui, dure LOCK_DAYS)
   conv.failedAttempts = (conv.failedAttempts || 0) + 1;
   conv.failedAt = now;
@@ -242,6 +224,7 @@ async function identifyWhatsAppGuest(from, history, text) {
       if (known) return known;
       if (!definitive) {
         console.warn('⚠️ Beds24 injoignable : vérification conservée, aucun code donné pour ce message ...' + String(from).slice(-3));
+        alertBeds24Down('vérification d\'un voyageur WhatsApp');
         return null;
       }
       conv.verifiedBookingId = null;
@@ -250,13 +233,16 @@ async function identifyWhatsAppGuest(from, history, text) {
     if (isLocked(conv)) return null;
     if (verificationSuspended()) return null; // plafond global d'échecs atteint : seulement /valider
 
-    const bookings = await getAllActiveBookings();
+    const current = await getActiveBookingsSafe(); // en cas de panne : dernière liste connue (30 min au plus)
+    if (!current.ok) alertBeds24Down('vérification d\'un voyageur WhatsApp');
+    const bookings = current.data;
     if (!bookings.length) return null;
     const propInfo = await getPropertyInfo();
 
     // Tout ce que le voyageur a écrit depuis le début (l'historique de 10 messages ne suffit pas : il oublie le début)
     const joined = [conv.identityText || '', ...history.filter(m => m.role === 'user').map(m => m.content), text].join(' \n ');
     const ctx = buildWaCtx(phoneKey(from), joined, buildRoomNumbers(propInfo));
+    ctx.nameSprayed = detectNameSpray(bookings, ctx);
 
     // Anti-devinette : trop d'adresses email qui ne correspondent à aucune réservation => blocage, le propriétaire reprend la main
     const knownEmails = new Set(bookings.map(b => String(b.email || '').toLowerCase().trim()).filter(Boolean));
@@ -270,9 +256,11 @@ async function identifyWhatsAppGuest(from, history, text) {
     }
 
     const scored = [];
+    let nearMiss = false; // une réservation correspond sur UN critère (hors téléphone : un voyageur dont le numéro correspond est le vrai voyageur)
     for (const b of bookings) {
       const { score, reasons } = waIdentityScore(b, ctx);
       if (score >= 2) scored.push({ b, score, reasons });
+      else if (score === 1 && !reasons.includes('téléphone')) nearMiss = true;
     }
     const { best, ambiguous } = pickBestBooking(scored);
     if (best) {
@@ -284,7 +272,12 @@ async function identifyWhatsAppGuest(from, history, text) {
     }
     if (ambiguous) console.warn('⚠️ Vérification WhatsApp ambiguë (plusieurs voyageurs correspondent) : refusée, ...' + String(from).slice(-3));
     if (ctx.sprayed) console.warn('⚠️ Texte suspect (liste de logements ou de dates) : critère séjour ignoré, ...' + String(from).slice(-3));
-    registerFailedAttempt(conv, text, from, ambiguous || ctx.sprayed);
+    if (ctx.nameSprayed) console.warn('⚠️ Texte suspect (noms de plusieurs voyageurs) : critère nom ignoré, ...' + String(from).slice(-3));
+    // Devinette probable (échec « fort ») : texte suspect, ambigu, email donné, ou une réservation réelle correspond presque. Sinon, un message qui
+    // parle de dates ou de logement (prospect) ne compte que comme échec « faible ».
+    const looks = looksLikeIdentityAttempt(text);
+    const strong = ambiguous || ctx.sprayed || ctx.nameSprayed || (looks && (nearMiss || (String(text).match(EMAIL_RE) || []).length > 0));
+    registerFailedAttempt(conv, text, from, strong, !strong);
     return null;
   } catch (err) {
     console.error('Erreur identifyWhatsAppGuest:', err.message);
@@ -312,8 +305,6 @@ module.exports = {
   verificationFailureCount,
   noteVerificationFailure,
   lastNameTokens,
-  webIdentityScore,
-  verifyGuestIdentity,
   EMAIL_RE,
   PHONE_RE,
   MONTH_NAMES,
@@ -322,6 +313,7 @@ module.exports = {
   extractUnits,
   waNameMatches,
   waIdentityScore,
+  detectNameSpray,
   countDayNumbers,
   looksLikeIdentityAttempt,
   buildWaCtx,

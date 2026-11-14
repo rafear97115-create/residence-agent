@@ -40,7 +40,7 @@ async function executeTool(name, input) {
     let text = `VÉRIFICATION EN TEMPS RÉEL — séjour du ${arrival} au ${departure} (${nights} nuit(s)) :\n`;
     text += result.free.length ? `Logements LIBRES :\n- ${result.free.join('\n- ')}\n` : 'Aucun logement libre sur ces dates.\n';
     if (result.occupied.length) text += `Logements OCCUPÉS : ${result.occupied.join(', ')}\n`;
-    text += "Présente ces informations au voyageur, avec les liens selon PRÉSENTATION DES MOYENS DE RÉSERVATION (logements libres uniquement). S'il n'y a aucun logement libre, dis que ces dates sont complètes et propose d'autres dates.";
+    text += "Présente ces informations au voyageur (cite les logements libres par leur nom et leur numéro), avec le lien de réservation selon PRÉSENTATION DES MOYENS DE RÉSERVATION. S'il n'y a aucun logement libre, dis que ces dates sont complètes et propose d'autres dates.";
     return { error: false, text };
   } catch (err) {
     console.error('Erreur executeTool:', err.message);

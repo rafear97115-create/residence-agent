@@ -4,6 +4,7 @@
  */
 
 const { WHATSAPP_API_VERSION, OWNER_PHONE, WHATSAPP_PHONE_ID, TELEGRAM_CHAT_ID, WHATSAPP_ALERT_TEMPLATE, WHATSAPP_ALERT_TEMPLATE_LANG } = require('./config');
+const { rateLimit } = require('./security');
 const { fetchT, normalizeWaNumber, scrub } = require('./utils');
 
 function getOwnerNumber() {
@@ -84,7 +85,16 @@ async function sendOwnerAlert(text) {
   return sendTelegram(text);
 }
 
+// Beds24 injoignable : une simple alerte au propriétaire (une par heure au plus), qui passe en manuel. Le bot ne répond pas à la place.
+async function alertBeds24Down(context = '') {
+  if (!rateLimit('beds24down:alert', 1, 3600 * 1000)) return false;
+  console.warn('🚨 Beds24 injoignable :', context || '-');
+  return sendOwnerAlert(`⚠️ Beds24 est injoignable${context ? ` (${context})` : ''}. Le bot ne peut plus lire les réservations ni répondre aux messages Airbnb / Booking. `
+    + `Passez en manuel : répondez directement dans Airbnb / Booking et vérifiez les arrivées vous-même. Je préviens à nouveau dans une heure si la panne continue, et dès que Beds24 répond.`).catch(() => false);
+}
+
 module.exports = {
+  alertBeds24Down,
   getOwnerNumber,
   sendWhatsAppReply,
   flattenForTemplate,
