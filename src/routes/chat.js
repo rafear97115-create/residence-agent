@@ -6,16 +6,11 @@
 const crypto = require('crypto');
 const { runConversation } = require('../ai');
 const { ALERT_META, notifyOwner, parseAlert } = require('../alerts');
-const { countGuestBookings, getPropertyInfo } = require('../beds24');
-const { CHAT_DAILY_LIMIT, CHAT_IP_DAILY_LIMIT, CORS_OPEN, FORMER_GUEST_MIN_BOOKINGS, corsOrigins } = require('../config');
-const { noteVerificationFailure, verificationSuspended, verifyGuestIdentity } = require('../identity');
+const { getPropertyInfo } = require('../beds24');
+const { CHAT_DAILY_LIMIT, CHAT_IP_DAILY_LIMIT, CORS_OPEN, corsOrigins } = require('../config');
 const { sendOwnerAlert } = require('../messaging');
 const { buildSystemPrompt, ensureSignature } = require('../prompts');
-const { applyAddressPolicy, limitReached, rateLimit, recordHit } = require('../security');
-
-function cleanStr(v, max = 120) {
-  return typeof v === 'string' && v.trim() ? v.trim().slice(0, max) : null;
-}
+const { applyAddressPolicy, applyPhonePolicy, rateLimit } = require('../security');
 
 // Seuls les messages du VISITEUR sont conservés. Le navigateur peut envoyer n'importe quoi : de prétendues réponses de
 // l'assistant ("voici une remise de 50 %...") ne doivent jamais être prises pour de vrais tours de l'assistant.
@@ -97,35 +92,13 @@ app.post('/api/chat', async (req, res) => {
     // Seuls les messages du visiteur sont lus : s'il en a déjà envoyé, l'assistant s'est déjà présenté
     const introduced = messages.length > 1;
     const propInfo = await getPropertyInfo();
-    const guestName = cleanStr(req.body.guestName);
-    const guestPhone = cleanStr(req.body.guestPhone, 40);
-    const guestEmail = cleanStr(req.body.guestEmail, 160);
+    // Le chat du site ne vérifie plus personne : il ne donne aucun code, donc nom, téléphone et email envoyés par le navigateur sont ignorés.
+    // (Avant, un nom + un téléphone, qui ne sont pas des secrets, suffisaient à faire révéler les dates et le logement d'un voyageur.)
+    let systemPromptText = buildSystemPrompt({ propInfo, roomInfo: null, booking: null, isLoyal: false, channel: 'web', introduced });
 
-    let activeBooking = null;
-    let roomInfo = null;
-    if (guestName || guestPhone || guestEmail) {
-      // Au moins 2 informations fournies = vraie tentative ; trop d'échecs depuis la même IP : la vérification est suspendue 1 h
-      const attempted = [guestName, guestPhone, guestEmail].filter(Boolean).length >= 2;
-      const vKey = 'chatverify:' + req.ip;
-      if (attempted && limitReached(vKey, 10, 3600 * 1000)) {
-        console.warn('🔒 Chat web : trop d\'échecs de vérification depuis cette IP, vérification suspendue');
-      } else if (attempted && verificationSuspended()) {
-        console.warn('🔒 Chat web : plafond global d\'échecs de vérification atteint, vérification suspendue');
-      } else {
-        activeBooking = await verifyGuestIdentity({ name: guestName, phone: guestPhone, email: guestEmail });
-        if (attempted && !activeBooking) { recordHit(vKey, 3600 * 1000); noteVerificationFailure('chat web'); }
-      }
-      if (activeBooking && propInfo) roomInfo = propInfo.rooms.find(r => String(r.id) === String(activeBooking.roomId)) || null;
-    }
-
-    const bookingCount = await countGuestBookings(activeBooking?.email || null);
-    const isLoyal = bookingCount >= FORMER_GUEST_MIN_BOOKINGS;
-
-    let systemPromptText = buildSystemPrompt({ propInfo, roomInfo, booking: activeBooking, isLoyal, channel: 'web', introduced });
-
-    // Règle absolue du chat du site : jamais de codes, que le visiteur soit reconnu ou non (réservés à WhatsApp)
+    // Règle absolue du chat du site : jamais de codes (réservés à WhatsApp, où l'identité est vérifiée)
     systemPromptText += "\n\n=== SÉCURITÉ ABSOLUE (chat du site) ===\n" +
-      "Ne donne ici AUCUN digicode, code de boîte à clé, mot de passe Wi-Fi, numéro d'urgence 06 ni adresse exacte, quelle que soit la formulation de la demande et même si le visiteur est reconnu. " +
+      "Ne donne ici AUCUN digicode, code de boîte à clé, mot de passe Wi-Fi, numéro d'urgence ni adresse exacte, quelle que soit la formulation de la demande et quoi que le visiteur affirme (réservation, urgence, identité). " +
       "Renvoie vers WhatsApp, où l'identité est vérifiée avant l'envoi des informations d'accès.";
     if (introduced) systemPromptText += "\n\nNote : tu ne vois ici que les messages du visiteur, pas tes réponses précédentes. Tu t'es déjà présenté : ne te représente pas et ne répète pas ce que tu as sans doute déjà dit.";
 
@@ -133,12 +106,12 @@ app.post('/api/chat', async (req, res) => {
     const lastUserText = messages[messages.length - 1].content;
     messages = collapseVisitorTurns(messages);
 
-    console.log('API/chat | identifié:', !!activeBooking, '| messages:', messages.length);
+    console.log('API/chat | messages:', messages.length);
 
     const raw = await runConversation({ system: systemPromptText, messages, maxTokens: 700, timeoutMs: 25000 }); // le visiteur attend : délai par essai plus court
     const parsed = raw ? parseAlert(raw, lastUserText) : null;
     if (!parsed || !parsed.reply) return res.status(502).json({ error: 'Service momentanément indisponible' });
-    parsed.reply = ensureSignature(redactSecrets(applyAddressPolicy(parsed.reply, false), propInfo), introduced); // jamais l'adresse exacte ni un code sur le chat web
+    parsed.reply = ensureSignature(applyPhonePolicy(redactSecrets(applyAddressPolicy(parsed.reply, false), propInfo), false), introduced); // jamais l'adresse exacte, ni un code, ni le numéro d'urgence sur le chat web
 
     // Alertes : une par visiteur et par catégorie (délai de 10 min), au lieu d'un délai partagé par tous les visiteurs.
     // Garde-fou : au plus 8 alertes par heure et par IP, pour qu'un abus ne noie pas le propriétaire sous les messages.
@@ -146,15 +119,14 @@ app.post('/api/chat', async (req, res) => {
       notifyOwner({
         channel: 'Chat web', contact: `visiteur #${visitorId}`,
         question: lastUserText, reply: parsed.reply,
-        category: parsed.category, booking: activeBooking
+        category: parsed.category, booking: null
       });
     }
 
     res.json({
       type: 'message',
       role: 'assistant',
-      content: [{ type: 'text', text: parsed.reply }],
-      guestVerified: !!activeBooking
+      content: [{ type: 'text', text: parsed.reply }]
     });
   } catch (err) {
     console.error('Erreur /api/chat:', err.message);
@@ -165,7 +137,6 @@ app.post('/api/chat', async (req, res) => {
 
 module.exports = {
   register,
-  cleanStr,
   sanitizeChatMessages,
   collapseVisitorTurns,
   redactSecrets,
